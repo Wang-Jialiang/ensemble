@@ -326,20 +326,32 @@ def evaluate_corruption(
     """
     通用 Corruption 鲁棒性评估
     """
+    from tqdm import tqdm
+
     logger = logger or get_logger()
     dataset_name = corruption_dataset.name
-    logger.info(f"\n🧪 Running Corruption Evaluation on {dataset_name}...")
+    n_corruptions = len(corruption_dataset.CORRUPTIONS)
+    total_evals = 5 * n_corruptions  # 5 severity × N corruptions
+
+    logger.info(f"\n🧪 Running Corruption Evaluation on {dataset_name}")
+    logger.info(
+        f"   📊 {n_corruptions} corruptions × 5 severities = {total_evals} 次评估"
+    )
 
     models, device = extract_models(trainer_or_models)
     results = {}
     overall_avg = 0.0
 
+    # 创建总进度条
+    pbar = tqdm(total=total_evals, desc="Corruption Eval", leave=False)
+
     for severity in range(1, 6):
-        logger.info(f"   Severity {severity}:")
         results[severity] = {}
         severity_accs = []
 
         for corruption in corruption_dataset.CORRUPTIONS:
+            pbar.set_postfix({"severity": severity, "type": corruption[:10]})
+
             loader = corruption_dataset.get_loader(
                 corruption,
                 severity=severity,
@@ -356,13 +368,16 @@ def evaluate_corruption(
 
             results[severity][corruption] = acc
             severity_accs.append(acc)
+            pbar.update(1)
 
         avg_acc_sev = np.mean(severity_accs)
-        logger.info(f"     -> Avg: {avg_acc_sev:.2f}%")
+        results[severity]["avg"] = avg_acc_sev
         overall_avg += avg_acc_sev
 
+    pbar.close()
+
     overall_avg /= 5.0
-    logger.info(f"\n   📈 Overall Avg: {overall_avg:.2f}%")
+    logger.info(f"   ✅ 完成! Overall Avg: {overall_avg:.2f}%")
 
     results["severity_5_raw"] = results[5]
     results["overall_avg"] = overall_avg
