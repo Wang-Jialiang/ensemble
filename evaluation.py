@@ -827,6 +827,9 @@ class LossLandscapeVisualizer:
         import matplotlib.pyplot as plt
 
         self.logger.info(f"📈 正在计算 2D Loss Landscape ({model_name})...")
+        self.logger.info(
+            f"   ⏳ 预计 {steps}×{steps}={steps * steps} 次前向传播，请耐心等待..."
+        )
 
         model = model.to(device)
         metric = self._create_metric(model, dataloader, device)
@@ -835,6 +838,7 @@ class LossLandscapeVisualizer:
         loss_data = loss_landscapes.random_plane(
             model, metric, distance=distance, steps=steps, normalization="filter"
         )
+        self.logger.info("   ✅ 2D 采样完成")
 
         # 创建坐标网格
         x = np.linspace(-distance, distance, steps)
@@ -924,8 +928,12 @@ class LossLandscapeVisualizer:
         results = {}
         pairs = [(i, j) for i in range(n_models) for j in range(i + 1, n_models)]
 
-        # 计算所有模型对的插值
-        for idx, (i, j) in enumerate(pairs):
+        # 计算所有模型对的插值 (带进度条)
+        from tqdm import tqdm
+
+        for idx, (i, j) in enumerate(
+            tqdm(pairs, desc="Computing Loss Landscape", leave=False)
+        ):
             model_i = models[i].to(device)
             model_j = models[j].to(device)
             metric = self._create_metric(model_i, dataloader, device)
@@ -934,7 +942,6 @@ class LossLandscapeVisualizer:
                 model_i, model_j, metric, steps=steps
             )
             results[f"M{i + 1}-M{j + 1}"] = loss_data
-            self.logger.info(f"   [{idx + 1}/{len(pairs)}] M{i + 1} ↔ M{j + 1} 完成")
 
         # 绘图
         fig, ax = plt.subplots(figsize=(12, 6))
