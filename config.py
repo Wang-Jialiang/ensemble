@@ -26,6 +26,7 @@ class Experiment:
     fixed_ratio: Optional[float] = None
     fixed_prob: Optional[float] = None
     # 覆盖参数
+    init_method: Optional[str] = None  # 初始化方法覆盖
     warmup_epochs: Optional[int] = None
     progressive_epochs: Optional[int] = None
     finetune_epochs: Optional[int] = None
@@ -100,6 +101,7 @@ class Config:
     log_level: str
     ece_n_bins: int
     ensemble_strategy: str  # 集成策略: "mean", "voting", "weighted"
+    init_method: str  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
     # 运行控制
     quick_test: bool

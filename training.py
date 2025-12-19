@@ -342,7 +342,9 @@ class GPUWorker:
 
         for _ in range(num_models):
             model = ModelFactory.create_model(
-                cfg.model_name, num_classes=cfg.num_classes
+                cfg.model_name,
+                num_classes=cfg.num_classes,
+                init_method=cfg.init_method,
             )
             model = model.to(self.device)
 

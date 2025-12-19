@@ -136,6 +136,24 @@ class MetricsCalculator:
                 ((probs - probs.mean(dim=0, keepdim=True)) ** 2).mean().item()
             )
 
+            # JS散度 (软不一致性)
+            js_sum = 0.0
+            for i in range(num_models):
+                for j in range(i + 1, num_models):
+                    p = probs[i]  # [num_samples, num_classes]
+                    q = probs[j]
+                    m = (p + q) / 2
+                    # KL(P||M) + KL(Q||M), 使用 log2 使结果在 [0, 1]
+                    kl_pm = (p * (torch.log2(p + 1e-10) - torch.log2(m + 1e-10))).sum(
+                        dim=1
+                    )
+                    kl_qm = (q * (torch.log2(q + 1e-10) - torch.log2(m + 1e-10))).sum(
+                        dim=1
+                    )
+                    js = 0.5 * (kl_pm + kl_qm)
+                    js_sum += js.mean().item()
+            metrics["js_divergence"] = js_sum / pair_count if pair_count > 0 else 0.0
+
             # Top-5准确率
             if self.num_classes >= 5:
                 top5 = ensemble_logits.topk(5, dim=1)[1]
@@ -637,6 +655,395 @@ class ModelListWrapper:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ Loss Landscape 可视化器                                                       ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+class LossLandscapeVisualizer:
+    """Loss Landscape 可视化器
+
+    用于可视化集成模型中各成员在损失地形上的位置分布。
+
+    功能:
+        - 1D 插值: 在两个模型之间线性插值，观察损失变化
+        - 2D 平面: 围绕单个模型在随机方向上采样，生成等高线图
+        - 模型间距离: 计算模型在参数空间中的欧氏距离
+
+    依赖: pip install loss-landscapes
+    """
+
+    def __init__(self, save_dir: str):
+        self.save_dir = Path(save_dir)
+        ensure_dir(self.save_dir)
+        self.logger = get_logger()
+
+    def _check_dependency(self):
+        """检查 loss-landscapes 依赖"""
+        import importlib.util
+
+        if importlib.util.find_spec("loss_landscapes") is None:
+            self.logger.warning(
+                "⚠️ loss-landscapes 未安装，请运行: pip install loss-landscapes"
+            )
+            return False
+        return True
+
+    def _create_metric(
+        self, model: nn.Module, dataloader: DataLoader, device: torch.device
+    ):
+        """创建损失评估器"""
+        import loss_landscapes.metrics as metrics
+
+        criterion = nn.CrossEntropyLoss()
+
+        class LossMetric(metrics.Metric):
+            """自定义损失评估器"""
+
+            def __init__(self, criterion, dataloader, device):
+                super().__init__()
+                self.criterion = criterion
+                self.dataloader = dataloader
+                self.device = device
+
+            def __call__(self, model):
+                model.eval()
+                total_loss = 0.0
+                total_samples = 0
+                with torch.no_grad():
+                    for inputs, targets in self.dataloader:
+                        inputs = inputs.to(self.device)
+                        targets = targets.to(self.device)
+                        outputs = model(inputs)
+                        loss = self.criterion(outputs, targets)
+                        total_loss += loss.item() * inputs.size(0)
+                        total_samples += inputs.size(0)
+                return total_loss / total_samples if total_samples > 0 else 0.0
+
+        return LossMetric(criterion, dataloader, device)
+
+    def plot_1d_interpolation(
+        self,
+        model1: nn.Module,
+        model2: nn.Module,
+        dataloader: DataLoader,
+        device: torch.device,
+        steps: int = 50,
+        filename: str = "loss_landscape_1d.png",
+        label1: str = "Model 1",
+        label2: str = "Model 2",
+    ) -> Optional[np.ndarray]:
+        """绘制两个模型之间的1D损失插值曲线
+
+        Args:
+            model1: 起始模型
+            model2: 终止模型
+            dataloader: 数据加载器
+            device: 计算设备
+            steps: 插值步数
+            filename: 保存文件名
+            label1: 模型1标签
+            label2: 模型2标签
+
+        Returns:
+            loss_data: 损失值数组，长度为 steps
+        """
+        if not self._check_dependency():
+            return None
+
+        import loss_landscapes
+        import matplotlib.pyplot as plt
+
+        self.logger.info(f"📈 正在计算 1D Loss Landscape ({label1} → {label2})...")
+
+        model1 = model1.to(device)
+        model2 = model2.to(device)
+        metric = self._create_metric(model1, dataloader, device)
+
+        # 线性插值
+        loss_data = loss_landscapes.linear_interpolation(
+            model1, model2, metric, steps=steps
+        )
+
+        # 绘图
+        fig, ax = plt.subplots(figsize=(10, 6))
+        x = np.linspace(0, 1, steps)
+        ax.plot(x, loss_data, "b-", linewidth=2)
+        ax.scatter([0, 1], [loss_data[0], loss_data[-1]], c="red", s=100, zorder=5)
+        ax.annotate(
+            label1,
+            (0, loss_data[0]),
+            textcoords="offset points",
+            xytext=(10, 10),
+            fontsize=10,
+        )
+        ax.annotate(
+            label2,
+            (1, loss_data[-1]),
+            textcoords="offset points",
+            xytext=(10, 10),
+            fontsize=10,
+        )
+
+        ax.set_xlabel("Interpolation (α)")
+        ax.set_ylabel("Loss")
+        ax.set_title(f"Loss Landscape: {label1} → {label2}")
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.close()
+
+        self.logger.info(f"📊 Saved: {filename}")
+        return loss_data
+
+    def plot_2d_plane(
+        self,
+        model: nn.Module,
+        dataloader: DataLoader,
+        device: torch.device,
+        distance: float = 1.0,
+        steps: int = 40,
+        filename: str = "loss_landscape_2d.png",
+        model_name: str = "Model",
+    ) -> Optional[np.ndarray]:
+        """绘制模型周围的2D损失地形等高线图
+
+        Args:
+            model: 目标模型
+            dataloader: 数据加载器
+            device: 计算设备
+            distance: 采样距离（参数空间中的范围）
+            steps: 每个方向的采样步数
+            filename: 保存文件名
+            model_name: 模型名称
+
+        Returns:
+            loss_data: 2D损失值数组，shape (steps, steps)
+        """
+        if not self._check_dependency():
+            return None
+
+        import loss_landscapes
+        import matplotlib.pyplot as plt
+
+        self.logger.info(f"📈 正在计算 2D Loss Landscape ({model_name})...")
+
+        model = model.to(device)
+        metric = self._create_metric(model, dataloader, device)
+
+        # 随机方向平面采样
+        loss_data = loss_landscapes.random_plane(
+            model, metric, distance=distance, steps=steps, normalization="filter"
+        )
+
+        # 创建坐标网格
+        x = np.linspace(-distance, distance, steps)
+        y = np.linspace(-distance, distance, steps)
+        X, Y = np.meshgrid(x, y)
+
+        # 绘制等高线图
+        fig, ax = plt.subplots(figsize=(10, 8))
+        contour = ax.contourf(X, Y, loss_data, levels=50, cmap="viridis")
+        plt.colorbar(contour, ax=ax, label="Loss")
+        ax.scatter([0], [0], c="red", s=100, marker="*", label=model_name, zorder=5)
+        ax.legend()
+        ax.set_xlabel("Direction 1")
+        ax.set_ylabel("Direction 2")
+        ax.set_title(f"2D Loss Landscape around {model_name}")
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.close()
+        self.logger.info(f"📊 Saved: {filename}")
+
+        # 绘制 3D 表面图 (裸眼3D效果)
+        fig_3d = plt.figure(figsize=(12, 9))
+        ax_3d = fig_3d.add_subplot(111, projection="3d")
+
+        # 绘制表面
+        surf = ax_3d.plot_surface(
+            X, Y, loss_data, cmap="viridis", edgecolor="none", alpha=0.9
+        )
+        fig_3d.colorbar(surf, ax=ax_3d, shrink=0.5, aspect=10, label="Loss")
+
+        # 标记模型位置
+        center_loss = loss_data[steps // 2, steps // 2]
+        ax_3d.scatter(
+            [0], [0], [center_loss], c="red", s=200, marker="*", label=model_name
+        )
+
+        ax_3d.set_xlabel("Direction 1")
+        ax_3d.set_ylabel("Direction 2")
+        ax_3d.set_zlabel("Loss")
+        ax_3d.set_title(f"3D Loss Landscape around {model_name}")
+        ax_3d.view_init(elev=30, azim=45)  # 设置视角
+        ax_3d.legend()
+
+        filename_3d = filename.replace(".png", "_3d.png")
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename_3d, dpi=150)
+        plt.close()
+        self.logger.info(f"📊 Saved: {filename_3d}")
+
+        return loss_data
+
+    def plot_ensemble_interpolations(
+        self,
+        models: List[nn.Module],
+        dataloader: DataLoader,
+        device: torch.device,
+        steps: int = 50,
+        filename: str = "ensemble_loss_landscape.png",
+    ) -> Dict[str, np.ndarray]:
+        """绘制集成中所有模型对之间的1D损失插值曲线
+
+        Args:
+            models: 模型列表
+            dataloader: 数据加载器
+            device: 计算设备
+            steps: 插值步数
+            filename: 保存文件名
+
+        Returns:
+            results: {(i,j): loss_data} 字典
+        """
+        if not self._check_dependency():
+            return {}
+
+        import loss_landscapes
+        import matplotlib.pyplot as plt
+
+        n_models = len(models)
+        if n_models < 2:
+            self.logger.warning("⚠️ 需要至少 2 个模型来计算插值")
+            return {}
+
+        self.logger.info(
+            f"📈 正在计算集成模型间的 Loss Landscape ({n_models} 个模型)..."
+        )
+
+        results = {}
+        pairs = [(i, j) for i in range(n_models) for j in range(i + 1, n_models)]
+
+        # 计算所有模型对的插值
+        for idx, (i, j) in enumerate(pairs):
+            model_i = models[i].to(device)
+            model_j = models[j].to(device)
+            metric = self._create_metric(model_i, dataloader, device)
+
+            loss_data = loss_landscapes.linear_interpolation(
+                model_i, model_j, metric, steps=steps
+            )
+            results[f"M{i + 1}-M{j + 1}"] = loss_data
+            self.logger.info(f"   [{idx + 1}/{len(pairs)}] M{i + 1} ↔ M{j + 1} 完成")
+
+        # 绘图
+        fig, ax = plt.subplots(figsize=(12, 6))
+        x = np.linspace(0, 1, steps)
+        colors = plt.cm.tab10(np.linspace(0, 1, len(results)))
+
+        for (pair_name, loss_data), color in zip(results.items(), colors):
+            ax.plot(x, loss_data, label=pair_name, linewidth=1.5, color=color)
+
+        ax.set_xlabel("Interpolation (α)")
+        ax.set_ylabel("Loss")
+        ax.set_title("Loss Landscape: Pairwise Model Interpolations")
+        ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename, dpi=150, bbox_inches="tight")
+        plt.close()
+
+        self.logger.info(f"📊 Saved: {filename}")
+        return results
+
+    def compute_model_distances(self, models: List[nn.Module]) -> np.ndarray:
+        """计算模型间的参数空间欧氏距离
+
+        Args:
+            models: 模型列表
+
+        Returns:
+            distance_matrix: 距离矩阵，shape (n_models, n_models)
+        """
+        n_models = len(models)
+        distance_matrix = np.zeros((n_models, n_models))
+
+        # 将所有模型参数展平
+        flat_params = []
+        for model in models:
+            params = torch.cat(
+                [p.data.view(-1).cpu() for p in model.parameters()]
+            ).numpy()
+            flat_params.append(params)
+
+        # 计算成对距离
+        for i in range(n_models):
+            for j in range(i + 1, n_models):
+                dist = np.linalg.norm(flat_params[i] - flat_params[j])
+                distance_matrix[i, j] = dist
+                distance_matrix[j, i] = dist
+
+        return distance_matrix
+
+    def plot_model_distance_heatmap(
+        self,
+        models: List[nn.Module],
+        filename: str = "model_distances.png",
+    ) -> np.ndarray:
+        """绘制模型间距离热力图
+
+        Args:
+            models: 模型列表
+            filename: 保存文件名
+
+        Returns:
+            distance_matrix: 距离矩阵
+        """
+        import matplotlib.pyplot as plt
+
+        self.logger.info("📈 正在计算模型间参数距离...")
+
+        distance_matrix = self.compute_model_distances(models)
+        n_models = len(models)
+
+        # 绘制热力图
+        fig, ax = plt.subplots(figsize=(8, 6))
+        im = ax.imshow(distance_matrix, cmap="YlOrRd")
+        plt.colorbar(im, ax=ax, label="Euclidean Distance")
+
+        # 设置标签
+        labels = [f"M{i + 1}" for i in range(n_models)]
+        ax.set_xticks(range(n_models))
+        ax.set_yticks(range(n_models))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+
+        # 在每个格子中显示数值
+        for i in range(n_models):
+            for j in range(n_models):
+                ax.text(
+                    j,
+                    i,
+                    f"{distance_matrix[i, j]:.1f}",
+                    ha="center",
+                    va="center",
+                    color="black"
+                    if distance_matrix[i, j] < distance_matrix.max() / 2
+                    else "white",
+                    fontsize=8,
+                )
+
+        ax.set_title("Model Parameter Space Distances")
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.close()
+
+        self.logger.info(f"📊 Saved: {filename}")
+        return distance_matrix
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Checkpoint 加载器                                                            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -799,22 +1206,31 @@ class ReportVisualizer:
             r.get("standard_metrics", {}).get("disagreement", 0)
             for r in results.values()
         ]
+        js_divergence = [
+            r.get("standard_metrics", {}).get("js_divergence", 0)
+            for r in results.values()
+        ]
         diversity = [
             r.get("standard_metrics", {}).get("diversity", 0) * 1000
             for r in results.values()
         ]
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
 
         ax1.bar(names, disagreement, color="#f39c12")
         ax1.set_ylabel("Disagreement (%)")
-        ax1.set_title("Model Disagreement (↑ more diverse)")
+        ax1.set_title("Hard Disagreement (↑ more diverse)")
         ax1.tick_params(axis="x", rotation=45)
 
-        ax2.bar(names, diversity, color="#1abc9c")
-        ax2.set_ylabel("Diversity (×1000)")
-        ax2.set_title("Prediction Diversity (↑ more diverse)")
+        ax2.bar(names, js_divergence, color="#e74c3c")
+        ax2.set_ylabel("JS Divergence")
+        ax2.set_title("Soft Disagreement (↑ more diverse)")
         ax2.tick_params(axis="x", rotation=45)
+
+        ax3.bar(names, diversity, color="#1abc9c")
+        ax3.set_ylabel("Diversity (×1000)")
+        ax3.set_title("Prediction Diversity (↑ more diverse)")
+        ax3.tick_params(axis="x", rotation=45)
 
         plt.tight_layout()
         plt.savefig(self.save_dir / filename, dpi=150)
@@ -1202,7 +1618,7 @@ class ReportGenerator:
             # Diversity
             log("   🔀 Diversity & Confidence")
             log(
-                f"      Disagreement: {m.get('disagreement', 0):.2f}%  |  Diversity: {m.get('diversity', 0):.6f}"
+                f"      Disagreement: {m.get('disagreement', 0):.2f}%  |  JS散度: {m.get('js_divergence', 0):.4f}  |  Diversity: {m.get('diversity', 0):.6f}"
             )
             log(
                 f"      Confidence: avg={m.get('avg_confidence', 0):.4f}, correct={m.get('avg_correct_confidence', 0):.4f}, incorrect={m.get('avg_incorrect_confidence', 0):.4f}"
@@ -1302,6 +1718,7 @@ class ReportGenerator:
         output_dir: str,
         corruption_dataset: Optional[CorruptionDataset] = None,
         run_gradcam: bool = False,
+        run_loss_landscape: bool = False,
     ):
         """
         从 checkpoint 直接评估并生成完整可视化报告
@@ -1315,6 +1732,7 @@ class ReportGenerator:
             output_dir: 输出目录
             corruption_dataset: Corruption 数据集 (可选)
             run_gradcam: 是否运行 Grad-CAM 分析
+            run_loss_landscape: 是否运行 Loss Landscape 分析
 
         输出:
             output_dir/
@@ -1325,6 +1743,8 @@ class ReportGenerator:
             ├── fairness.png             # 公平性指标
             ├── training_time.png        # 训练时间
             ├── robustness.png           # 鲁棒性热力图 (如有)
+            ├── model_distances.png      # 模型参数距离 (如有)
+            ├── ensemble_loss_landscape.png  # Loss Landscape (如有)
             └── final_metrics.json       # 指标数据
         """
         get_logger().info(f"\n{'=' * 80}")
@@ -1335,6 +1755,7 @@ class ReportGenerator:
 
         ensure_dir(output_dir)
         results = {}
+        all_models = {}  # 收集所有实验的模型用于 Loss Landscape
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         for idx, ckpt_path in enumerate(checkpoint_paths, 1):
@@ -1344,6 +1765,7 @@ class ReportGenerator:
             ctx = CheckpointLoader.load(ckpt_path, cfg)
             exp_name = ctx["name"]
             models = [m.to(device) for m in ctx["models"]]
+            all_models[exp_name] = models  # 保存用于后续分析
 
             # 使用通用评估方法
             result = cls._evaluate_models(
@@ -1363,6 +1785,37 @@ class ReportGenerator:
         get_logger().info("\n📊 Generating visualizations...")
         visualizer = ReportVisualizer(output_dir)
         visualizer.generate_all(results)
+
+        # Loss Landscape 分析
+        if run_loss_landscape and all_models:
+            get_logger().info("\n🏔️ Generating Loss Landscape visualizations...")
+            landscape_viz = LossLandscapeVisualizer(output_dir)
+
+            for exp_name, models in all_models.items():
+                # 模型参数距离热力图 (无需 loss-landscapes 依赖)
+                landscape_viz.plot_model_distance_heatmap(
+                    models, filename=f"{exp_name}_model_distances.png"
+                )
+
+                # Loss Landscape 插值 (需要 loss-landscapes)
+                landscape_viz.plot_ensemble_interpolations(
+                    models,
+                    test_loader,
+                    device,
+                    filename=f"{exp_name}_loss_landscape.png",
+                )
+
+                # 2D/3D 表面图 - 为第一个模型生成 (计算量较大)
+                if len(models) > 0:
+                    landscape_viz.plot_2d_plane(
+                        models[0],
+                        test_loader,
+                        device,
+                        distance=1.0,
+                        steps=20,  # 减少步数以加快计算
+                        filename=f"{exp_name}_landscape_surface.png",
+                        model_name=f"{exp_name}_M1",
+                    )
 
         # 生成并保存文本报告
         cls._save_and_print(results, output_dir)

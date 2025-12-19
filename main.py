@@ -44,7 +44,11 @@ def run_train_mode(
 
 
 def run_eval_mode(
-    base_cfg: Config, eval_checkpoints: list, test_loader, corruption_dataset
+    base_cfg: Config,
+    eval_checkpoints: list,
+    test_loader,
+    corruption_dataset,
+    run_loss_landscape: bool = False,
 ):
     """评估模式 - 加载模型并生成报告"""
     checkpoint_paths = [ckpt["path"] for ckpt in eval_checkpoints]
@@ -56,6 +60,7 @@ def run_eval_mode(
         output_dir=base_cfg.save_dir,
         corruption_dataset=corruption_dataset,
         run_gradcam=True,
+        run_loss_landscape=run_loss_landscape,
     )
 
 
@@ -65,6 +70,9 @@ def main():
     parser.add_argument("--eval", action="store_true", help="进入评估模式")
     parser.add_argument(
         "--quick-test", action="store_true", help="快速测试模式 (4 epoch, 1 model)"
+    )
+    parser.add_argument(
+        "--loss-landscape", action="store_true", help="生成 Loss Landscape 可视化"
     )
     args = parser.parse_args()
 
@@ -89,7 +97,13 @@ def main():
         if not eval_ckpts:
             return get_logger().error("❌ 请在 config.yaml 中指定 eval_checkpoints")
         _, _, test_loader, corruption_dataset = load_dataset(base_cfg)
-        run_eval_mode(base_cfg, eval_ckpts, test_loader, corruption_dataset)
+        run_eval_mode(
+            base_cfg,
+            eval_ckpts,
+            test_loader,
+            corruption_dataset,
+            run_loss_landscape=args.loss_landscape,
+        )
     else:
         train_loader, val_loader, _, _ = load_dataset(base_cfg)
         run_train_mode(base_cfg, experiments, train_loader, val_loader)

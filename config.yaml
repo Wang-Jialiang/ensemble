@@ -56,6 +56,7 @@ base:
   log_level: "INFO"
   ece_n_bins: 15
   ensemble_strategy: "mean"  # 集成策略: "mean" (等权平均) 或 "voting" (多数投票)
+  init_method: "kaiming"  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
   # ========== 运行控制 ==========
   quick_test: false
