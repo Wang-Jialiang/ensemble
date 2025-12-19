@@ -1,0 +1,114 @@
+# ==============================================================================
+# 配置文件
+# ==============================================================================
+
+base:
+  # ========== 数据配置 ==========
+  data_root: "./data"
+  dataset_name: "cifar10"
+  val_split: 0.1
+  test_split: 0.2  # 用于没有官方划分的数据集 (如 EuroSAT)
+
+  # ========== 模型配置 ==========
+  model_name: "resnet18"
+  num_models_per_gpu: 2
+  compile_model: false
+
+  # ========== 训练超参数 ==========
+  batch_size: 512
+  lr: 0.0015
+  weight_decay: 0.0001
+  max_grad_norm: 1.0
+  seed: 42
+
+  # ========== 三阶段训练参数 ==========
+  warmup_epochs: 20
+  progressive_epochs: 40
+  finetune_epochs: 20
+
+  # ========== Mask 参数 ==========
+  mask_pool_size: 100
+  mask_start_ratio: 0.15
+  mask_end_ratio: 0.35
+  mask_prob_start: 0.30
+  mask_prob_end: 0.70
+  finetune_mask_ratio: 0.25
+  finetune_mask_prob: 0.50
+
+  # ========== 数据加载配置 ==========
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+  # ========== 优化配置 ==========
+  use_amp: true
+  use_tf32: true
+  early_stopping_patience: 30
+
+  # ========== 保存配置 ==========
+  save_dir: ""
+  save_every_n_epochs: 20
+  keep_last_n_checkpoints: 3
+
+  # ========== 日志配置 ==========
+  use_tensorboard: true
+  log_level: "INFO"
+  ece_n_bins: 15
+  ensemble_strategy: "mean"  # 集成策略: "mean" (等权平均) 或 "voting" (多数投票)
+
+  # ========== 运行控制 ==========
+  quick_test: false
+  resume_from: ""
+
+# ==============================================================================
+# 实验列表
+# ==============================================================================
+experiments:
+  - name: "ExpD_Perlin_Curriculum"
+    desc: "Perlin + Dual Curriculum (PROPOSED)"
+    augmentation: "perlin"
+    use_curriculum: true
+
+  - name: "ExpA_Baseline"
+    desc: "Baseline (No Augmentation)"
+    augmentation: "none"
+    use_curriculum: false
+
+  - name: "ExpB_Cutout_Fixed"
+    desc: "Cutout Fixed (ratio=25%, prob=50%)"
+    augmentation: "cutout"
+    use_curriculum: false
+    fixed_ratio: 0.25
+    fixed_prob: 0.5
+
+  - name: "ExpC_Perlin_Fixed"
+    desc: "Perlin Fixed (ratio=25%, prob=50%)"
+    augmentation: "perlin"
+    use_curriculum: false
+    fixed_ratio: 0.25
+    fixed_prob: 0.5
+
+  - name: "ExpE_Cutout_Curriculum"
+    desc: "Cutout + Dual Curriculum"
+    augmentation: "cutout"
+    use_curriculum: true
+
+# ==============================================================================
+# 评估配置 (仅 --eval 模式)
+# ==============================================================================
+eval_checkpoints:
+  - name: "ExpA_Baseline"
+    path: "./outputs/exp_latest/checkpoints/ExpA_Baseline/best"
+
+  - name: "ExpB_Cutout_Fixed"
+    path: "./outputs/exp_latest/checkpoints/ExpB_Cutout_Fixed/best"
+
+  - name: "ExpC_Perlin_Fixed"
+    path: "./outputs/exp_latest/checkpoints/ExpC_Perlin_Fixed/best"
+
+  - name: "ExpD_Perlin_Curriculum"
+    path: "./outputs/exp_latest/checkpoints/ExpD_Perlin_Curriculum/best"
+
+  - name: "ExpE_Cutout_Curriculum"
+    path: "./outputs/exp_latest/checkpoints/ExpE_Cutout_Curriculum/best"
