@@ -71,6 +71,8 @@ class Config:
     weight_decay: float
     max_grad_norm: float
     seed: int
+    optimizer: str  # 优化器: "adamw", "sgd", "adam", "rmsprop"
+    scheduler: str  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
 
     # 三阶段与 Mask
     warmup_epochs: int

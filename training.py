@@ -27,6 +27,91 @@ from .models import ModelFactory
 from .utils import ensure_dir, format_duration, get_logger
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ 优化器与调度器工厂                                                            ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+def create_optimizer(
+    model: nn.Module, optimizer_name: str, lr: float, weight_decay: float
+) -> optim.Optimizer:
+    """
+    创建优化器
+
+    Args:
+        model: 模型
+        optimizer_name: 优化器名称 (adamw, sgd, adam, rmsprop)
+        lr: 学习率
+        weight_decay: 权重衰减
+
+    Returns:
+        optimizer: 优化器实例
+    """
+    optimizer_name = optimizer_name.lower()
+    params = model.parameters()
+
+    if optimizer_name == "adamw":
+        return optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "adam":
+        return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "sgd":
+        return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9)
+    elif optimizer_name == "rmsprop":
+        return optim.RMSprop(params, lr=lr, weight_decay=weight_decay)
+    else:
+        raise ValueError(
+            f"不支持的优化器: {optimizer_name}. 支持: adamw, sgd, adam, rmsprop"
+        )
+
+
+def create_scheduler(
+    optimizer: optim.Optimizer,
+    scheduler_name: str,
+    total_epochs: int,
+    steps_per_epoch: int = 0,
+) -> Optional[optim.lr_scheduler.LRScheduler]:
+    """
+    创建学习率调度器
+
+    Args:
+        optimizer: 优化器
+        scheduler_name: 调度器名称 (cosine, step, plateau, onecycle, none)
+        total_epochs: 总训练轮数
+        steps_per_epoch: 每轮步数 (用于 OneCycleLR)
+
+    Returns:
+        scheduler: 调度器实例，none 时返回 None
+    """
+    scheduler_name = scheduler_name.lower()
+
+    if scheduler_name == "cosine":
+        return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
+    elif scheduler_name == "step":
+        # 每 30% 和 60% 的 epoch 时降低学习率
+        milestones = [int(total_epochs * 0.3), int(total_epochs * 0.6)]
+        return optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=milestones, gamma=0.1
+        )
+    elif scheduler_name == "plateau":
+        return optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5
+        )
+    elif scheduler_name == "onecycle":
+        if steps_per_epoch <= 0:
+            raise ValueError("OneCycleLR 需要 steps_per_epoch > 0")
+        return optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=optimizer.param_groups[0]["lr"] * 10,
+            total_steps=total_epochs * steps_per_epoch,
+        )
+    elif scheduler_name == "none":
+        return None
+    else:
+        raise ValueError(
+            f"不支持的调度器: {scheduler_name}. 支持: cosine, step, plateau, onecycle, none"
+        )
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 早停机制                                                                     ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -351,12 +436,9 @@ class GPUWorker:
             if cfg.compile_model and hasattr(torch, "compile"):
                 model = torch.compile(model)
 
-            optimizer = optim.AdamW(
-                model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-            )
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=cfg.total_epochs
-            )
+            # 使用工厂函数创建优化器和调度器
+            optimizer = create_optimizer(model, cfg.optimizer, cfg.lr, cfg.weight_decay)
+            scheduler = create_scheduler(optimizer, cfg.scheduler, cfg.total_epochs)
 
             self.models.append(model)
             self.optimizers.append(optimizer)
@@ -440,10 +522,20 @@ class GPUWorker:
         self.stream.synchronize()
         return self._pending_loss if self._pending_loss else 0.0
 
-    def step_schedulers(self):
-        """更新学习率调度器"""
+    def step_schedulers(self, val_loss: Optional[float] = None):
+        """更新学习率调度器
+
+        Args:
+            val_loss: 验证损失 (用于 ReduceLROnPlateau)
+        """
         for scheduler in self.schedulers:
-            scheduler.step()
+            if scheduler is None:
+                continue
+            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                if val_loss is not None:
+                    scheduler.step(val_loss)
+            else:
+                scheduler.step()
 
     def predict_batch(self, inputs: torch.Tensor) -> torch.Tensor:
         """批量预测"""

@@ -20,6 +20,8 @@ base:
   weight_decay: 0.0001
   max_grad_norm: 1.0
   seed: 42
+  optimizer: "adamw"  # 优化器: "adamw", "sgd", "adam", "rmsprop"
+  scheduler: "cosine"  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
 
   # ========== 三阶段训练参数 ==========
   warmup_epochs: 20
