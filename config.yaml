@@ -22,6 +22,7 @@ base:
   seed: 42
   optimizer: "adamw"  # 优化器: "adamw", "sgd", "adam", "rmsprop"
   scheduler: "cosine"  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
+  label_smoothing: 0.1  # 标签平滑系数 (0.0=不使用, 0.1=常用值)
 
   # ========== 三阶段训练参数 ==========
   warmup_epochs: 20
@@ -36,6 +37,11 @@ base:
   mask_prob_end: 0.70
   finetune_mask_ratio: 0.25
   finetune_mask_prob: 0.50
+
+  # ========== 阶段学习率缩放 ==========
+  warmup_lr_scale: 0.1  # Warmup阶段使用 lr * 0.1
+  progressive_lr_scale: 1.0  # Progressive阶段使用原始 lr
+  finetune_lr_scale: 0.1  # Finetune阶段使用 lr * 0.1
 
   # ========== 数据加载配置 ==========
   num_workers: 8

@@ -537,6 +537,20 @@ class GPUWorker:
             else:
                 scheduler.step()
 
+    def set_lr(self, lr: float):
+        """设置所有模型的学习率
+
+        Args:
+            lr: 新的学习率
+        """
+        for optimizer in self.optimizers:
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+
+    def get_lr(self) -> float:
+        """获取当前学习率"""
+        return self.optimizers[0].param_groups[0]["lr"] if self.optimizers else 0.0
+
     def predict_batch(self, inputs: torch.Tensor) -> torch.Tensor:
         """批量预测"""
         inputs = inputs.to(self.device)
@@ -721,21 +735,25 @@ class StagedEnsembleTrainer:
 
         self.logger = logger
 
-    def _get_stage_info(self, epoch: int) -> Tuple[int, str, float, float, bool]:
-        """获取当前阶段信息"""
+    def _get_stage_info(self, epoch: int) -> Tuple[int, str, float, float, bool, float]:
+        """获取当前阶段信息
+
+        Returns:
+            Tuple: (stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale)
+        """
         cfg = self.cfg
 
         # 模式1: 无增强 (Baseline)
         if self.augmentation_method == "none":
-            return 1, "NoAug", 0.0, 0.0, False
+            return 1, "NoAug", 0.0, 0.0, False, 1.0
 
         # 模式2: 固定参数模式
         if not self.use_curriculum:
-            return 1, "Fixed", self.fixed_ratio, self.fixed_prob, True
+            return 1, "Fixed", self.fixed_ratio, self.fixed_prob, True, 1.0
 
         # 模式3: 课程学习模式 (三阶段)
         if epoch < cfg.warmup_epochs:
-            return 1, "Warmup", 0.0, 0.0, False
+            return 1, "Warmup", 0.0, 0.0, False, cfg.warmup_lr_scale
         elif epoch < cfg.warmup_epochs + cfg.progressive_epochs:
             progress = (epoch - cfg.warmup_epochs) / cfg.progressive_epochs
             mask_ratio = (
@@ -746,16 +764,35 @@ class StagedEnsembleTrainer:
                 cfg.mask_prob_start
                 + (cfg.mask_prob_end - cfg.mask_prob_start) * progress
             )
-            return 2, "Progressive", mask_ratio, mask_prob, True
+            return (
+                2,
+                "Progressive",
+                mask_ratio,
+                mask_prob,
+                True,
+                cfg.progressive_lr_scale,
+            )
         else:
-            return 3, "Finetune", cfg.finetune_mask_ratio, cfg.finetune_mask_prob, True
+            return (
+                3,
+                "Finetune",
+                cfg.finetune_mask_ratio,
+                cfg.finetune_mask_prob,
+                True,
+                cfg.finetune_lr_scale,
+            )
 
     def _train_epoch(self, train_loader: DataLoader, epoch: int) -> float:
         """训练一个epoch"""
-        criterion = nn.CrossEntropyLoss()
-        stage_num, stage_name, mask_ratio, mask_prob, use_mask = self._get_stage_info(
-            epoch
+        criterion = nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
+        stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale = (
+            self._get_stage_info(epoch)
         )
+
+        # 应用阶段学习率缩放
+        stage_lr = self.cfg.lr * lr_scale
+        for worker in self.workers:
+            worker.set_lr(stage_lr)
 
         # 预计算mask（如果需要）
         for worker in self.workers:
@@ -763,7 +800,10 @@ class StagedEnsembleTrainer:
 
         total_loss = 0.0
         num_batches = 0
-        iterator = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{self.cfg.total_epochs}")
+        iterator = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch + 1}/{self.cfg.total_epochs} [{stage_name}] lr={stage_lr:.6f}",
+        )
 
         for inputs, targets in iterator:
             # 异步训练
@@ -782,7 +822,7 @@ class StagedEnsembleTrainer:
 
             iterator.set_postfix({"loss": total_loss / num_batches})
 
-        # 更新学习率
+        # 更新学习率调度器（scheduler会基于缩放后的lr继续调整）
         for worker in self.workers:
             worker.step_schedulers()
 

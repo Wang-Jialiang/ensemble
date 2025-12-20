@@ -73,6 +73,7 @@ class Config:
     seed: int
     optimizer: str  # 优化器: "adamw", "sgd", "adam", "rmsprop"
     scheduler: str  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
+    label_smoothing: float  # 标签平滑系数 (0.0-1.0, 常用值0.1)
 
     # 三阶段与 Mask
     warmup_epochs: int
@@ -85,6 +86,11 @@ class Config:
     mask_prob_end: float
     finetune_mask_ratio: float
     finetune_mask_prob: float
+
+    # 阶段学习率缩放
+    warmup_lr_scale: float  # Warmup阶段学习率缩放因子
+    progressive_lr_scale: float  # Progressive阶段学习率缩放因子
+    finetune_lr_scale: float  # Finetune阶段学习率缩放因子
 
     # 加载与优化
     num_workers: int
