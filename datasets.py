@@ -542,6 +542,147 @@ class OODDataset:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ Domain Shift 数据集                                                          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+class DomainShiftDataset:
+    """Domain Shift (域偏移) 评估数据集
+
+    用于评估模型在不同视觉域/风格上的泛化能力。
+    与 OOD 不同的是，Domain Shift 数据集有相同的类别，只是风格不同。
+
+    使用示例:
+        # 自定义数据集
+        >>> ds = DomainShiftDataset.from_folder("./data/sketches", id_dataset="cifar10")
+        >>> loader = ds.get_loader(batch_size=128)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        images: torch.Tensor,
+        labels: torch.Tensor,
+        mean: List[float],
+        std: List[float],
+    ):
+        """直接构造函数"""
+        self.name = name
+        self.images = images  # [N, C, H, W], uint8
+        self.labels = labels  # [N], long
+        self._mean = torch.tensor(mean).view(1, 3, 1, 1)
+        self._std = torch.tensor(std).view(1, 3, 1, 1)
+
+    @property
+    def num_samples(self) -> int:
+        return len(self.images)
+
+    @classmethod
+    def from_folder(
+        cls,
+        folder_path: str,
+        id_dataset: str,
+        class_names: List[str] = None,
+    ) -> "DomainShiftDataset":
+        """从文件夹加载 Domain Shift 数据集
+
+        文件夹结构应为:
+        folder_path/
+            class_0/
+                img1.jpg
+                img2.jpg
+            class_1/
+                img1.jpg
+            ...
+
+        Args:
+            folder_path: 数据集文件夹路径
+            id_dataset: ID 数据集名称（用于确定标准化参数和图像尺寸）
+            class_names: 类别名称列表（可选，默认使用文件夹名）
+
+        Returns:
+            DomainShiftDataset 实例
+        """
+        from pathlib import Path
+
+        from PIL import Image
+
+        if id_dataset not in DATASET_REGISTRY:
+            raise ValueError(
+                f"未知 ID 数据集: {id_dataset}. 可用: {list(DATASET_REGISTRY.keys())}"
+            )
+
+        id_class = DATASET_REGISTRY[id_dataset]
+        folder = Path(folder_path)
+
+        if not folder.exists():
+            raise FileNotFoundError(f"未找到数据集文件夹: {folder_path}")
+
+        # 获取类别
+        class_folders = sorted([d for d in folder.iterdir() if d.is_dir()])
+        if not class_folders:
+            raise ValueError(f"文件夹中未找到子目录: {folder_path}")
+
+        get_logger().info(f"📥 加载 Domain Shift 数据集: {folder.name}...")
+
+        images_list = []
+        labels_list = []
+        target_size = id_class.IMAGE_SIZE
+
+        for class_idx, class_folder in enumerate(class_folders):
+            image_files = list(class_folder.glob("*.[jJ][pP][gG]")) + list(
+                class_folder.glob("*.[pP][nN][gG]")
+            )
+
+            for img_path in image_files:
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                    img = img.resize((target_size, target_size), Image.BILINEAR)
+                    img_np = np.array(img)
+                    images_list.append(img_np)
+                    labels_list.append(class_idx)
+                except Exception as e:
+                    get_logger().warning(f"跳过无效图像 {img_path}: {e}")
+
+        if not images_list:
+            raise ValueError(f"未找到有效图像: {folder_path}")
+
+        images = np.stack(images_list, axis=0)
+        images_tensor = torch.from_numpy(images).permute(0, 3, 1, 2)
+        labels_tensor = torch.tensor(labels_list, dtype=torch.long)
+
+        get_logger().info(
+            f"✅ 加载了 {len(images_tensor)} 个样本, {len(class_folders)} 个类别"
+        )
+
+        return cls(
+            name=folder.name,
+            images=images_tensor,
+            labels=labels_tensor,
+            mean=id_class.MEAN,
+            std=id_class.STD,
+        )
+
+    def get_loader(
+        self,
+        batch_size: int = 128,
+        num_workers: int = 4,
+    ) -> DataLoader:
+        """获取数据加载器"""
+        images_float = self.images.float() / 255.0
+        images_normalized = (images_float - self._mean) / self._std
+
+        dataset = TensorDataset(images_normalized, self.labels)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据集加载函数                                                               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
