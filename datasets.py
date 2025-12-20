@@ -385,6 +385,163 @@ class CorruptionDataset:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ OOD 数据集                                                                   ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+class OODDataset:
+    """OOD (Out-of-Distribution) 评估数据集
+
+    用于评估模型的 OOD 检测能力，支持多种 OOD 数据集。
+
+    使用示例:
+        >>> ood_dataset = OODDataset.from_name("svhn", id_dataset="cifar10", root="./data")
+        >>> loader = ood_dataset.get_loader(batch_size=128)
+    """
+
+    # 预定义的 OOD 数据集配置
+    OOD_CONFIGS = {
+        "svhn": {
+            "name": "SVHN",
+            "loader": lambda root: torchvision.datasets.SVHN(
+                root=root, split="test", download=True
+            ),
+            "image_size": 32,
+            "compatible_with": ["cifar10"],  # 适合作为哪些ID数据集的OOD
+        },
+        "textures": {
+            "name": "Textures (DTD)",
+            "loader": lambda root: torchvision.datasets.DTD(
+                root=root, split="test", download=True
+            ),
+            "image_size": None,  # 需要resize
+            "compatible_with": ["cifar10", "eurosat"],
+        },
+    }
+
+    def __init__(
+        self,
+        name: str,
+        images: torch.Tensor,
+        mean: List[float],
+        std: List[float],
+    ):
+        """直接构造函数，推荐使用 from_name()"""
+        self.name = name
+        self.images = images  # [N, C, H, W], uint8
+        self._mean = torch.tensor(mean).view(1, 3, 1, 1)
+        self._std = torch.tensor(std).view(1, 3, 1, 1)
+
+    @property
+    def num_samples(self) -> int:
+        return len(self.images)
+
+    @classmethod
+    def from_name(
+        cls,
+        ood_name: str,
+        id_dataset: str,
+        root: str = DEFAULT_DATA_ROOT,
+    ) -> "OODDataset":
+        """根据名称加载 OOD 数据集
+
+        Args:
+            ood_name: OOD 数据集名称 (svhn, textures 等)
+            id_dataset: ID 数据集名称 (cifar10, eurosat)，用于确定标准化参数
+            root: 数据根目录
+
+        Returns:
+            OODDataset 实例
+        """
+        if ood_name not in cls.OOD_CONFIGS:
+            raise ValueError(
+                f"未知 OOD 数据集: {ood_name}. 可用: {list(cls.OOD_CONFIGS.keys())}"
+            )
+
+        if id_dataset not in DATASET_REGISTRY:
+            raise ValueError(
+                f"未知 ID 数据集: {id_dataset}. 可用: {list(DATASET_REGISTRY.keys())}"
+            )
+
+        ood_config = cls.OOD_CONFIGS[ood_name]
+        id_class = DATASET_REGISTRY[id_dataset]
+
+        get_logger().info(f"📥 加载 OOD 数据集: {ood_config['name']}...")
+
+        # 加载 OOD 数据集
+        try:
+            ood_dataset = ood_config["loader"](root)
+        except Exception as e:
+            get_logger().error(f"❌ OOD 数据集加载失败: {e}")
+            raise
+
+        # 转换为张量
+        images_list = []
+        target_size = id_class.IMAGE_SIZE
+
+        for i in range(len(ood_dataset)):
+            img, _ = ood_dataset[i]
+
+            # 处理不同格式的图像
+            if hasattr(img, "numpy"):
+                img_np = np.array(img)
+            else:
+                img_np = np.array(img)
+
+            # 确保是 RGB
+            if len(img_np.shape) == 2:
+                img_np = np.stack([img_np] * 3, axis=-1)
+            elif img_np.shape[-1] == 4:
+                img_np = img_np[:, :, :3]
+
+            # Resize 到 ID 数据集的尺寸
+            if img_np.shape[0] != target_size or img_np.shape[1] != target_size:
+                from PIL import Image
+
+                img_pil = Image.fromarray(img_np)
+                img_pil = img_pil.resize((target_size, target_size), Image.BILINEAR)
+                img_np = np.array(img_pil)
+
+            images_list.append(img_np)
+
+        images = np.stack(images_list, axis=0)  # [N, H, W, C]
+        images_tensor = torch.from_numpy(images).permute(0, 3, 1, 2)  # [N, C, H, W]
+
+        get_logger().info(
+            f"✅ 加载了 {len(images_tensor)} 个 OOD 样本 (尺寸: {target_size}x{target_size})"
+        )
+
+        return cls(
+            name=ood_config["name"],
+            images=images_tensor,
+            mean=id_class.MEAN,
+            std=id_class.STD,
+        )
+
+    def get_loader(
+        self,
+        batch_size: int = 128,
+        num_workers: int = 4,
+    ) -> DataLoader:
+        """获取 OOD 数据加载器"""
+        # 标准化
+        images_float = self.images.float() / 255.0
+        images_normalized = (images_float - self._mean) / self._std
+
+        # 使用 -1 作为 OOD 标签
+        labels = torch.full((len(self.images),), -1, dtype=torch.long)
+
+        dataset = TensorDataset(images_normalized, labels)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据集加载函数                                                               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
