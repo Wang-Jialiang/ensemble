@@ -12,7 +12,7 @@ from typing import List, Optional
 
 import torch
 
-from .utils import DEFAULT_SAVE_ROOT, ensure_dir, get_logger
+from ..utils import DEFAULT_SAVE_ROOT, ensure_dir, get_logger
 
 
 @dataclass
@@ -169,7 +169,7 @@ class Config:
 
     def _auto_configure_for_dataset(self) -> None:
         """根据数据集自动配置 num_classes 和 image_size"""
-        from .datasets import DATASET_REGISTRY
+        from ..datasets import DATASET_REGISTRY
 
         dataset_name = self.dataset_name.lower()
 
@@ -186,7 +186,7 @@ class Config:
                 setattr(self, k, v)
 
         # 检查模型兼容性
-        from .models import ModelFactory
+        from ..models import ModelFactory
 
         warnings = ModelFactory.check_compatibility(self.model_name, self.dataset_name)
         for w in warnings:

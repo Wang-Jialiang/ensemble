@@ -14,7 +14,7 @@ from .evaluation import ReportGenerator
 from .training import train_experiment
 from .utils import get_logger, set_seed
 
-DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
+DEFAULT_CONFIG = Path(__file__).parent / "config" / "default.yaml"
 
 
 def run_train_mode(

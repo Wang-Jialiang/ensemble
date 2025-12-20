@@ -4,7 +4,7 @@ Corruption 数据集生成脚本
 ================================================================================
 
 生成 corruption 数据集 (CIFAR-10-C 格式):
-    python -m my.generate_corruption --dataset eurosat --root ./data
+    python -m ensemble.datasets.generate --dataset eurosat --root ./data
 
 生成的文件结构:
     {root}/{DatasetName}-C/
@@ -20,8 +20,8 @@ from typing import Optional
 
 import numpy as np
 
-from .datasets import CORRUPTIONS, DATASET_REGISTRY
-from .utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
+from ..utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
+from .core import CORRUPTIONS, DATASET_REGISTRY
 
 # =============================================================================
 # Corruption 生成器
