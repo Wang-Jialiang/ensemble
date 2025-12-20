@@ -118,7 +118,7 @@ class MetricsCalculator:
                 100.0 * correct_per_model.any(dim=0).float().mean().item()
             )
 
-            # 分歧度
+            # 分歧度（churn）
             num_models = all_preds.shape[0]
             disagreement_sum = sum(
                 (all_preds[i] != all_preds[j]).float().mean().item()
@@ -240,6 +240,132 @@ class MetricsCalculator:
                         )
                 metrics["acc_gini_coef"] = gini
                 metrics["fairness_score"] = max(0.0, 100.0 - metrics["acc_disparity"])
+
+                # Bottom-k 类别准确率 (基于单模型平均表现找出最差类别)
+                # 计算每个单模型在每个类别上的准确率
+                num_models = all_preds.shape[0]
+                single_model_class_accs = []  # [num_models, num_classes]
+                for m in range(num_models):
+                    model_preds = all_preds[m]  # [num_samples]
+                    model_class_acc = []
+                    for c in range(self.num_classes):
+                        mask = targets == c
+                        count = mask.sum().item()
+                        if count > 0:
+                            acc = (
+                                100.0
+                                * ((model_preds == targets) & mask).sum().item()
+                                / count
+                            )
+                        else:
+                            acc = 0.0
+                        model_class_acc.append(acc)
+                    single_model_class_accs.append(model_class_acc)
+
+                # 单模型平均类别准确率
+                single_model_avg_class_acc = torch.tensor(single_model_class_accs).mean(
+                    dim=0
+                )  # [num_classes]
+
+                # 找出单模型上表现最差的 k 个类别 (k=3)
+                k_values = [3, 5] if self.num_classes >= 5 else [3]
+                for k in k_values:
+                    if k <= self.num_classes:
+                        # 按单模型平均准确率排序，取最差的 k 个类别索引
+                        _, bottom_k_indices = torch.topk(
+                            single_model_avg_class_acc, k, largest=False
+                        )
+                        # 计算集成模型在这 k 个类别上的准确率
+                        bottom_k_ensemble_accs = (
+                            valid_accs[bottom_k_indices]
+                            if len(valid_accs) == self.num_classes
+                            else torch.tensor(
+                                [per_class_acc[i] for i in bottom_k_indices.tolist()]
+                            )
+                        )
+                        metrics[f"bottom_{k}_class_acc"] = (
+                            bottom_k_ensemble_accs.mean().item()
+                        )
+                        # 同时记录单模型在这些类别上的平均准确率作为对比
+                        metrics[f"single_model_bottom_{k}_class_acc"] = (
+                            single_model_avg_class_acc[bottom_k_indices].mean().item()
+                        )
+
+                # 少数群体公平性指标
+                # 根据样本数量确定少数群体和多数群体
+                class_counts = torch.tensor(per_class_count)
+                valid_class_mask = class_counts > 0
+
+                if valid_class_mask.sum() >= 2:  # 至少需要2个有效类别
+                    # 找出样本数最少的类别（少数群体）和样本数最多的类别（多数群体）
+                    valid_counts = class_counts[valid_class_mask]
+                    valid_indices = torch.where(valid_class_mask)[0]
+
+                    min_count_idx = valid_indices[valid_counts.argmin()].item()
+                    max_count_idx = valid_indices[valid_counts.argmax()].item()
+
+                    # 少数群体和多数群体的样本数
+                    metrics["minority_class_idx"] = min_count_idx
+                    metrics["majority_class_idx"] = max_count_idx
+                    metrics["minority_class_count"] = per_class_count[min_count_idx]
+                    metrics["majority_class_count"] = per_class_count[max_count_idx]
+
+                    # 计算集成模型的召回率 (也就是每个类的准确率)
+                    minority_recall_ensemble = per_class_acc[min_count_idx] / 100.0
+                    majority_recall_ensemble = per_class_acc[max_count_idx] / 100.0
+
+                    # 计算单模型平均召回率
+                    minority_recall_single = (
+                        single_model_avg_class_acc[min_count_idx].item() / 100.0
+                    )
+                    majority_recall_single = (
+                        single_model_avg_class_acc[max_count_idx].item() / 100.0
+                    )
+
+                    # RER (Relative Error Reduction) = (单模型错误率 - 集成错误率) / 单模型错误率
+                    # 错误率 = 1 - 召回率
+                    minority_error_single = 1.0 - minority_recall_single
+                    minority_error_ensemble = 1.0 - minority_recall_ensemble
+                    majority_error_single = 1.0 - majority_recall_single
+                    majority_error_ensemble = 1.0 - majority_recall_ensemble
+
+                    # 计算 RER (避免除零)
+                    if minority_error_single > 0:
+                        metrics["minority_rer"] = (
+                            (minority_error_single - minority_error_ensemble)
+                            / minority_error_single
+                        ) * 100.0
+                    else:
+                        metrics["minority_rer"] = 0.0  # 单模型已经完美，无法再减少错误
+
+                    if majority_error_single > 0:
+                        metrics["majority_rer"] = (
+                            (majority_error_single - majority_error_ensemble)
+                            / majority_error_single
+                        ) * 100.0
+                    else:
+                        metrics["majority_rer"] = 0.0
+
+                    # RER 差距 (正值表示少数群体受益更多)
+                    metrics["rer_gap"] = (
+                        metrics["minority_rer"] - metrics["majority_rer"]
+                    )
+
+                    # EOD (Equalized Odds Difference) = |多数群体召回率 - 少数群体召回率|
+                    # 这里使用集成模型的召回率计算
+                    metrics["eod"] = (
+                        abs(majority_recall_ensemble - minority_recall_ensemble) * 100.0
+                    )
+
+                    # 同时记录单模型的 EOD 作为对比
+                    metrics["single_model_eod"] = (
+                        abs(majority_recall_single - minority_recall_single) * 100.0
+                    )
+
+                    # EOD 改善 (负值表示公平性提升，差距缩小)
+                    metrics["eod_improvement"] = (
+                        metrics["single_model_eod"] - metrics["eod"]
+                    )
             else:
                 metrics.update(
                     {
