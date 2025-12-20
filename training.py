@@ -874,7 +874,7 @@ class StagedEnsembleTrainer:
         try:
             for epoch in range(self.cfg.total_epochs):
                 epoch_start_time = time.time()
-                stage_num, stage_name, mask_ratio, mask_prob, use_mask = (
+                stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale = (
                     self._get_stage_info(epoch)
                 )
 
