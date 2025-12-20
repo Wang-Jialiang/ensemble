@@ -154,6 +154,23 @@ class MetricsCalculator:
                     js_sum += js.mean().item()
             metrics["js_divergence"] = js_sum / pair_count if pair_count > 0 else 0.0
 
+            # 斯皮尔曼相关系数 (衡量预测排名一致性，越低表示多样性越高)
+            from scipy.stats import spearmanr
+
+            spearman_sum = 0.0
+            spearman_count = 0
+            probs_np = probs.cpu().numpy()  # [num_models, num_samples, num_classes]
+            for i in range(num_models):
+                for j in range(i + 1, num_models):
+                    for s in range(probs_np.shape[1]):
+                        corr, _ = spearmanr(probs_np[i, s], probs_np[j, s])
+                        if not np.isnan(corr):
+                            spearman_sum += corr
+                            spearman_count += 1
+            metrics["spearman_correlation"] = (
+                spearman_sum / spearman_count if spearman_count > 0 else 1.0
+            )
+
             # Top-5准确率
             if self.num_classes >= 5:
                 top5 = ensemble_logits.topk(5, dim=1)[1]
@@ -1640,7 +1657,7 @@ class ReportGenerator:
             # Diversity
             log("   🔀 Diversity & Confidence")
             log(
-                f"      Disagreement: {m.get('disagreement', 0):.2f}%  |  JS散度: {m.get('js_divergence', 0):.4f}  |  Diversity: {m.get('diversity', 0):.6f}"
+                f"      Disagreement: {m.get('disagreement', 0):.2f}%  |  JS散度: {m.get('js_divergence', 0):.4f}  |  Spearman: {m.get('spearman_correlation', 1.0):.4f}"
             )
             log(
                 f"      Confidence: avg={m.get('avg_confidence', 0):.4f}, correct={m.get('avg_correct_confidence', 0):.4f}, incorrect={m.get('avg_incorrect_confidence', 0):.4f}"
