@@ -110,6 +110,11 @@ class Config:
     log_level: str
     ece_n_bins: int
     ensemble_strategy: str  # 集成策略: "mean", "voting", "weighted"
+
+    # 对抗鲁棒性评估参数
+    adv_eps: float  # FGSM/PGD 扰动强度 ε (常用值: 8/255 ≈ 0.031)
+    adv_alpha: float  # PGD 步长 α (常用值: 2/255 ≈ 0.008)
+    adv_pgd_steps: int  # PGD 迭代步数 (常用值: 10, 20)
     init_method: str  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
     # 运行控制

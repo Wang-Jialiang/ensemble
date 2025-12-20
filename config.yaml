@@ -65,6 +65,11 @@ base:
   log_level: "INFO"
   ece_n_bins: 15
   ensemble_strategy: "mean"  # 集成策略: "mean" (等权平均) 或 "voting" (多数投票)
+
+  # ========== 对抗鲁棒性评估配置 ==========
+  adv_eps: 0.03137  # 扰动强度 ε = 8/255 ≈ 0.031
+  adv_alpha: 0.00784  # PGD 步长 α = 2/255 ≈ 0.008
+  adv_pgd_steps: 10  # PGD 迭代步数
   init_method: "kaiming"  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
   # ========== 运行控制 ==========
