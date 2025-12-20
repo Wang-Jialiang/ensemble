@@ -23,6 +23,7 @@ base:
   optimizer: "adamw"  # 优化器: "adamw", "sgd", "adam", "rmsprop"
   scheduler: "cosine"  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
   label_smoothing: 0.1  # 标签平滑系数 (0.0=不使用, 0.1=常用值)
+  onecycle_max_lr_factor: 10.0  # OneCycleLR 最大学习率倍数
 
   # ========== 三阶段训练参数 ==========
   warmup_epochs: 20

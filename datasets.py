@@ -4,6 +4,10 @@
 ================================================================================
 """
 
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ SSL证书验证修复 (可通过环境变量 DISABLE_SSL_VERIFY=1 启用)
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+import os
 import ssl
 import tarfile
 import time
@@ -19,10 +23,32 @@ from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
 
 from .utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
 
+if os.environ.get("DISABLE_SSL_VERIFY", "0") == "1":
+    ssl._create_default_https_context = ssl._create_unverified_context
+
+
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ SSL证书验证修复
+# ║ 全局常量定义
 # ╚══════════════════════════════════════════════════════════════════════════════╝
-ssl._create_default_https_context = ssl._create_unverified_context
+
+# 15种标准Corruption类型 (与ImageNet-C一致)
+CORRUPTIONS = [
+    "gaussian_noise",
+    "shot_noise",
+    "impulse_noise",
+    "defocus_blur",
+    "glass_blur",
+    "motion_blur",
+    "zoom_blur",
+    "snow",
+    "frost",
+    "fog",
+    "brightness",
+    "contrast",
+    "elastic_transform",
+    "pixelate",
+    "jpeg_compression",
+]
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -209,10 +235,10 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         all_images = np.stack(all_images, axis=0)  # (N, 64, 64, 3)
         all_targets = np.array(all_targets)
 
-        # 划分训练/测试集: 使用固定种子保证可重复性
+        # 划分训练/测试集: 使用隔离的 RNG 保证可重复性且不影响全局状态
         total_samples = len(all_images)
-        np.random.seed(self.seed)
-        indices = np.random.permutation(total_samples)
+        rng = np.random.default_rng(self.seed)
+        indices = rng.permutation(total_samples)
 
         test_size = int(total_samples * self.test_split)
         train_size = total_samples - test_size
@@ -257,24 +283,8 @@ class CorruptionDataset:
         >>> dataset = CorruptionDataset.from_name("eurosat", "./data")
     """
 
-    # 15种标准Corruption类型
-    CORRUPTIONS = [
-        "gaussian_noise",
-        "shot_noise",
-        "impulse_noise",
-        "defocus_blur",
-        "glass_blur",
-        "motion_blur",
-        "zoom_blur",
-        "snow",
-        "frost",
-        "fog",
-        "brightness",
-        "contrast",
-        "elastic_transform",
-        "pixelate",
-        "jpeg_compression",
-    ]
+    # 引用模块级常量
+    CORRUPTIONS = CORRUPTIONS
 
     def __init__(self, name: str, data_dir: Path, mean: List[float], std: List[float]):
         """直接构造函数，推荐使用 from_name()"""

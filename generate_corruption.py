@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from .datasets import DATASET_REGISTRY
+from .datasets import CORRUPTIONS, DATASET_REGISTRY
 from .utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
 
 # =============================================================================
@@ -35,24 +35,8 @@ class CorruptionGenerator:
     依赖: pip install imagecorruptions
     """
 
-    # 15种标准Corruption类型 (与ImageNet-C一致)
-    CORRUPTIONS = [
-        "gaussian_noise",
-        "shot_noise",
-        "impulse_noise",
-        "defocus_blur",
-        "glass_blur",
-        "motion_blur",
-        "zoom_blur",
-        "snow",
-        "frost",
-        "fog",
-        "brightness",
-        "contrast",
-        "elastic_transform",
-        "pixelate",
-        "jpeg_compression",
-    ]
+    # 引用模块级常量
+    CORRUPTIONS = CORRUPTIONS
 
     @staticmethod
     def apply(img: np.ndarray, corruption_type: str, severity: int = 5) -> np.ndarray:

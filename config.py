@@ -74,6 +74,7 @@ class Config:
     optimizer: str  # 优化器: "adamw", "sgd", "adam", "rmsprop"
     scheduler: str  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
     label_smoothing: float  # 标签平滑系数 (0.0-1.0, 常用值0.1)
+    onecycle_max_lr_factor: float  # OneCycleLR 最大学习率倍数 (默认10)
 
     # 三阶段与 Mask
     warmup_epochs: int

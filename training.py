@@ -26,9 +26,22 @@ from .config import Config
 from .models import ModelFactory
 from .utils import ensure_dir, format_duration, get_logger
 
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ 优化器与调度器工厂                                                            ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
+# ╭──────────────────────────────────────────────────────────────────────────────╮
+# │ 常量定义                                                                         │
+# ╰──────────────────────────────────────────────────────────────────────────────╯
+
+# Perlin 噪声生成参数
+PERLIN_OCTAVES_LARGE = 4  # 图像尺寸 >= 64 时的 octaves
+PERLIN_OCTAVES_SMALL = 3  # 图像尺寸 < 64 时的 octaves
+
+# Cutout 增强的填充值
+CUTOUT_FILL_VALUE = 0.5
+
+# 学习率调度器默认参数
+STEP_LR_MILESTONES = (0.3, 0.6)  # 在这些位置降低学习率
+STEP_LR_GAMMA = 0.1  # 学习率衰减因子
+PLATEAU_FACTOR = 0.5
+PLATEAU_PATIENCE = 5
 
 
 def create_optimizer(
@@ -68,6 +81,7 @@ def create_scheduler(
     scheduler_name: str,
     total_epochs: int,
     steps_per_epoch: int = 0,
+    max_lr_factor: float = 10.0,
 ) -> Optional[optim.lr_scheduler.LRScheduler]:
     """
     创建学习率调度器
@@ -77,6 +91,7 @@ def create_scheduler(
         scheduler_name: 调度器名称 (cosine, step, plateau, onecycle, none)
         total_epochs: 总训练轮数
         steps_per_epoch: 每轮步数 (用于 OneCycleLR)
+        max_lr_factor: OneCycleLR 最大学习率倍数 (默认10)
 
     Returns:
         scheduler: 调度器实例，none 时返回 None
@@ -86,21 +101,20 @@ def create_scheduler(
     if scheduler_name == "cosine":
         return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
     elif scheduler_name == "step":
-        # 每 30% 和 60% 的 epoch 时降低学习率
-        milestones = [int(total_epochs * 0.3), int(total_epochs * 0.6)]
+        milestones = [int(total_epochs * m) for m in STEP_LR_MILESTONES]
         return optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=milestones, gamma=0.1
+            optimizer, milestones=milestones, gamma=STEP_LR_GAMMA
         )
     elif scheduler_name == "plateau":
         return optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5
+            optimizer, mode="min", factor=PLATEAU_FACTOR, patience=PLATEAU_PATIENCE
         )
     elif scheduler_name == "onecycle":
         if steps_per_epoch <= 0:
             raise ValueError("OneCycleLR 需要 steps_per_epoch > 0")
         return optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=optimizer.param_groups[0]["lr"] * 10,
+            max_lr=optimizer.param_groups[0]["lr"] * max_lr_factor,
             total_steps=total_epochs * steps_per_epoch,
         )
     elif scheduler_name == "none":
@@ -188,7 +202,7 @@ class CloudMaskGenerator:
         for _ in range(num_masks):
             # 动态调整 octaves 参数
             scale = self.base_scale * random.uniform(0.8, 1.2)
-            octaves = 4 if self.h >= 64 else 3
+            octaves = PERLIN_OCTAVES_LARGE if self.h >= 64 else PERLIN_OCTAVES_SMALL
             persistence = 0.5
 
             noise = self._generate_perlin_noise(scale, octaves, persistence)
@@ -265,7 +279,7 @@ class CutoutAugmentation(AugmentationMethod):
         for i in range(B):
             y = random.randint(0, max(0, H - mask_size))
             x = random.randint(0, max(0, W - mask_size))
-            augmented[i, :, y : y + mask_size, x : x + mask_size] = 0.5
+            augmented[i, :, y : y + mask_size, x : x + mask_size] = CUTOUT_FILL_VALUE
 
         return augmented, targets
 
@@ -423,7 +437,7 @@ class GPUWorker:
         # 创建模型
         self.models: List[nn.Module] = []
         self.optimizers: List[optim.Optimizer] = []
-        self.schedulers: List[optim.lr_scheduler.LRScheduler] = []
+        self.schedulers: List[Optional[optim.lr_scheduler.LRScheduler]] = []
 
         for _ in range(num_models):
             model = ModelFactory.create_model(
@@ -438,7 +452,12 @@ class GPUWorker:
 
             # 使用工厂函数创建优化器和调度器
             optimizer = create_optimizer(model, cfg.optimizer, cfg.lr, cfg.weight_decay)
-            scheduler = create_scheduler(optimizer, cfg.scheduler, cfg.total_epochs)
+            scheduler = create_scheduler(
+                optimizer,
+                cfg.scheduler,
+                cfg.total_epochs,
+                max_lr_factor=getattr(cfg, "onecycle_max_lr_factor", 10.0),
+            )
 
             self.models.append(model)
             self.optimizers.append(optimizer)
@@ -570,7 +589,7 @@ class GPUWorker:
             state = {
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             }
             save_path = Path(save_dir) / f"{prefix}_gpu{self.gpu_id}_model{i}.pth"
             torch.save(state, save_path)
@@ -587,7 +606,8 @@ class GPUWorker:
                 )
                 model.load_state_dict(state["model_state_dict"])
                 optimizer.load_state_dict(state["optimizer_state_dict"])
-                scheduler.load_state_dict(state["scheduler_state_dict"])
+                if scheduler and state.get("scheduler_state_dict"):
+                    scheduler.load_state_dict(state["scheduler_state_dict"])
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1087,7 +1107,7 @@ def train_experiment(
     返回:
         (trainer, training_time)
     """
-    aug_method = augmentation_method or ("perlin" if cfg.use_perlin_mask else "none")
+    aug_method = augmentation_method or "perlin"
     curriculum = use_curriculum if use_curriculum is not None else True
     f_ratio = fixed_ratio if fixed_ratio is not None else 0.25
     f_prob = fixed_prob if fixed_prob is not None else 0.5
