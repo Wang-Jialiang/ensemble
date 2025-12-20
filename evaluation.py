@@ -693,6 +693,16 @@ def evaluate_ood(
     all_msp = np.concatenate([id_msp, ood_msp])
     all_entropy = np.concatenate([id_entropy, ood_entropy])
 
+    # 边界检查：确保有足够的数据计算 AUROC
+    if len(id_msp) == 0 or len(ood_msp) == 0:
+        logger.warning("   ⚠️ ID 或 OOD 数据为空，无法计算 AUROC")
+        return {
+            "ood_dataset": ood_name,
+            "id_samples": len(id_msp),
+            "ood_samples": len(ood_msp),
+            "error": "Empty data",
+        }
+
     # 计算 AUROC
     # MSP: 高值表示 ID（所以直接用）
     auroc_msp = roc_auc_score(all_labels, all_msp) * 100.0
@@ -718,7 +728,9 @@ def evaluate_ood(
             else sorted_pos[0]
         )
 
-        # 计算 FPR
+        # 计算 FPR (避免除零)
+        if len(neg_scores) == 0:
+            return 0.0
         fpr = (neg_scores >= threshold).sum() / len(neg_scores)
         return fpr * 100.0
 
@@ -1033,7 +1045,9 @@ class GradCAMAnalyzer:
                 entropies.append(entropy)
 
             # 预测准确率
-            correct = sum(1 for p, l in zip(model_preds, labels) if p == l)
+            correct = sum(
+                1 for pred, label in zip(model_preds, labels) if pred == label
+            )
             accuracy = correct / len(labels)
 
             per_model_metrics.append(
@@ -2007,7 +2021,9 @@ class ReportGenerator:
     def _generate_report(cls, results: Dict[str, Any]) -> str:
         """生成报告字符串"""
         lines = []
-        log = lambda s="": lines.append(str(s))
+
+        def log(s=""):
+            lines.append(str(s))
 
         exp_names = list(results.keys())
         is_single = len(exp_names) == 1
@@ -2116,7 +2132,7 @@ class ReportGenerator:
     @classmethod
     def evaluate_and_report(
         cls,
-        trainers: List["StagedEnsembleTrainer"],
+        trainers: List,  # List of StagedEnsembleTrainer instances
         test_loader: DataLoader,
         cfg: Config,
         save_dir: str,

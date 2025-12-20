@@ -13,7 +13,7 @@ import tarfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -389,6 +389,52 @@ class CorruptionDataset:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
+# OOD 数据集注册表 (可动态扩展)
+OOD_REGISTRY: Dict[str, dict] = {}
+
+
+def register_ood_dataset(
+    name: str, display_name: str, loader_fn, compatible_with: List[str] = None
+):
+    """注册 OOD 数据集
+
+    Args:
+        name: 数据集标识符 (用于 from_name)
+        display_name: 显示名称
+        loader_fn: 加载函数，接收 root 参数，返回 torchvision 兼容的数据集
+        compatible_with: 兼容的 ID 数据集列表（可选，仅用于文档）
+
+    Example:
+        >>> register_ood_dataset(
+        ...     "svhn",
+        ...     "SVHN",
+        ...     lambda root: torchvision.datasets.SVHN(root=root, split="test", download=True),
+        ...     compatible_with=["cifar10"]
+        ... )
+    """
+    OOD_REGISTRY[name] = {
+        "name": display_name,
+        "loader": loader_fn,
+        "compatible_with": compatible_with or [],
+    }
+
+
+# 预注册常用 OOD 数据集
+register_ood_dataset(
+    "svhn",
+    "SVHN",
+    lambda root: torchvision.datasets.SVHN(root=root, split="test", download=True),
+    compatible_with=["cifar10"],
+)
+
+register_ood_dataset(
+    "textures",
+    "Textures (DTD)",
+    lambda root: torchvision.datasets.DTD(root=root, split="test", download=True),
+    compatible_with=["cifar10", "eurosat"],
+)
+
+
 class OODDataset:
     """OOD (Out-of-Distribution) 评估数据集
 
@@ -397,27 +443,10 @@ class OODDataset:
     使用示例:
         >>> ood_dataset = OODDataset.from_name("svhn", id_dataset="cifar10", root="./data")
         >>> loader = ood_dataset.get_loader(batch_size=128)
-    """
 
-    # 预定义的 OOD 数据集配置
-    OOD_CONFIGS = {
-        "svhn": {
-            "name": "SVHN",
-            "loader": lambda root: torchvision.datasets.SVHN(
-                root=root, split="test", download=True
-            ),
-            "image_size": 32,
-            "compatible_with": ["cifar10"],  # 适合作为哪些ID数据集的OOD
-        },
-        "textures": {
-            "name": "Textures (DTD)",
-            "loader": lambda root: torchvision.datasets.DTD(
-                root=root, split="test", download=True
-            ),
-            "image_size": None,  # 需要resize
-            "compatible_with": ["cifar10", "eurosat"],
-        },
-    }
+    添加新数据集:
+        >>> register_ood_dataset("lsun", "LSUN", lambda root: ...)
+    """
 
     def __init__(
         self,
@@ -453,9 +482,9 @@ class OODDataset:
         Returns:
             OODDataset 实例
         """
-        if ood_name not in cls.OOD_CONFIGS:
+        if ood_name not in OOD_REGISTRY:
             raise ValueError(
-                f"未知 OOD 数据集: {ood_name}. 可用: {list(cls.OOD_CONFIGS.keys())}"
+                f"未知 OOD 数据集: {ood_name}. 可用: {list(OOD_REGISTRY.keys())}"
             )
 
         if id_dataset not in DATASET_REGISTRY:
@@ -463,7 +492,7 @@ class OODDataset:
                 f"未知 ID 数据集: {id_dataset}. 可用: {list(DATASET_REGISTRY.keys())}"
             )
 
-        ood_config = cls.OOD_CONFIGS[ood_name]
+        ood_config = OOD_REGISTRY[ood_name]
         id_class = DATASET_REGISTRY[id_dataset]
 
         get_logger().info(f"📥 加载 OOD 数据集: {ood_config['name']}...")
@@ -482,11 +511,7 @@ class OODDataset:
         for i in range(len(ood_dataset)):
             img, _ = ood_dataset[i]
 
-            # 处理不同格式的图像
-            if hasattr(img, "numpy"):
-                img_np = np.array(img)
-            else:
-                img_np = np.array(img)
+            img_np = np.array(img)
 
             # 确保是 RGB
             if len(img_np.shape) == 2:
@@ -499,7 +524,9 @@ class OODDataset:
                 from PIL import Image
 
                 img_pil = Image.fromarray(img_np)
-                img_pil = img_pil.resize((target_size, target_size), Image.BILINEAR)
+                img_pil = img_pil.resize(
+                    (target_size, target_size), Image.Resampling.BILINEAR
+                )
                 img_np = np.array(img_pil)
 
             images_list.append(img_np)
@@ -546,6 +573,39 @@ class OODDataset:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
+# Domain Shift 数据集注册表 (可动态扩展)
+DOMAIN_REGISTRY: Dict[str, dict] = {}
+
+
+def register_domain_dataset(
+    name: str,
+    display_name: str,
+    folder_path: str,
+    compatible_with: List[str] = None,
+):
+    """注册 Domain Shift 数据集
+
+    Args:
+        name: 数据集标识符 (用于 from_name)
+        display_name: 显示名称
+        folder_path: 数据集文件夹路径
+        compatible_with: 兼容的 ID 数据集列表
+
+    Example:
+        >>> register_domain_dataset(
+        ...     "cifar10_sketch",
+        ...     "CIFAR-10 Sketch",
+        ...     "./data/cifar10_sketch",
+        ...     compatible_with=["cifar10"]
+        ... )
+    """
+    DOMAIN_REGISTRY[name] = {
+        "name": display_name,
+        "folder_path": folder_path,
+        "compatible_with": compatible_with or [],
+    }
+
+
 class DomainShiftDataset:
     """Domain Shift (域偏移) 评估数据集
 
@@ -553,9 +613,14 @@ class DomainShiftDataset:
     与 OOD 不同的是，Domain Shift 数据集有相同的类别，只是风格不同。
 
     使用示例:
-        # 自定义数据集
+        # 从注册表加载
+        >>> ds = DomainShiftDataset.from_name("cifar10_sketch", id_dataset="cifar10")
+
+        # 从文件夹加载
         >>> ds = DomainShiftDataset.from_folder("./data/sketches", id_dataset="cifar10")
-        >>> loader = ds.get_loader(batch_size=128)
+
+    添加新数据集:
+        >>> register_domain_dataset("my_domain", "My Domain", "./data/my_domain")
     """
 
     def __init__(
@@ -576,6 +641,29 @@ class DomainShiftDataset:
     @property
     def num_samples(self) -> int:
         return len(self.images)
+
+    @classmethod
+    def from_name(
+        cls,
+        domain_name: str,
+        id_dataset: str,
+    ) -> "DomainShiftDataset":
+        """从注册表加载 Domain Shift 数据集
+
+        Args:
+            domain_name: 已注册的域偏移数据集名称
+            id_dataset: ID 数据集名称（用于确定标准化参数和图像尺寸）
+
+        Returns:
+            DomainShiftDataset 实例
+        """
+        if domain_name not in DOMAIN_REGISTRY:
+            raise ValueError(
+                f"未知 Domain 数据集: {domain_name}. 可用: {list(DOMAIN_REGISTRY.keys())}"
+            )
+
+        config = DOMAIN_REGISTRY[domain_name]
+        return cls.from_folder(config["folder_path"], id_dataset)
 
     @classmethod
     def from_folder(
@@ -637,7 +725,9 @@ class DomainShiftDataset:
             for img_path in image_files:
                 try:
                     img = Image.open(img_path).convert("RGB")
-                    img = img.resize((target_size, target_size), Image.BILINEAR)
+                    img = img.resize(
+                        (target_size, target_size), Image.Resampling.BILINEAR
+                    )
                     img_np = np.array(img)
                     images_list.append(img_np)
                     labels_list.append(class_idx)
