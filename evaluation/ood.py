@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..utils import get_logger
-from .core import extract_models
+from .inference import get_models_from_source
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ OOD 检测评估                                                                  ║
@@ -50,7 +50,7 @@ def evaluate_ood(
     logger = logger or get_logger()
     logger.info(f"\n🔍 Running OOD Detection Evaluation ({ood_name})")
 
-    models, device = extract_models(trainer_or_models)
+    models, device = get_models_from_source(trainer_or_models)
 
     def get_confidence_scores(loader: DataLoader) -> Tuple[np.ndarray, np.ndarray]:
         """获取集成模型的置信度分数"""

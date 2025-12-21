@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..utils import get_logger
-from .core import extract_models
+from .inference import get_models_from_source
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 对抗攻击方法                                                                 ║
@@ -167,7 +167,7 @@ def evaluate_adversarial(
     logger.info(f"   ε = {eps:.4f} ({eps * 255:.1f}/255)")
     logger.info(f"   PGD: α = {alpha:.4f}, steps = {pgd_steps}")
 
-    models, device = extract_models(trainer_or_models)
+    models, device = get_models_from_source(trainer_or_models)
 
     # 获取数据集的标准化参数
     if dataset_name.lower() in DATASET_REGISTRY:
