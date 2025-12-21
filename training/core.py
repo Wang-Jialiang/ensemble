@@ -49,6 +49,7 @@ class StagedEnsembleTrainer:
         use_curriculum: bool = True,
         fixed_ratio: float = 0.25,
         fixed_prob: float = 0.5,
+        share_warmup_backbone: bool = False,
     ):
         self.name = method_name
         self.cfg = cfg
@@ -59,6 +60,7 @@ class StagedEnsembleTrainer:
         self.use_curriculum = use_curriculum
         self.fixed_ratio = fixed_ratio
         self.fixed_prob = fixed_prob
+        self.share_warmup_backbone = share_warmup_backbone
 
         # 性能优化设置
         if cfg.use_tf32:
@@ -115,6 +117,10 @@ class StagedEnsembleTrainer:
 
         # 保存配置
         cfg.save()
+
+    def get_models(self) -> List[nn.Module]:
+        """获取所有模型列表 (与其他 Trainer 接口一致)"""
+        return [model for worker in self.workers for model in worker.models]
 
     def setup_logging(self):
         """设置日志系统"""
@@ -282,6 +288,14 @@ class StagedEnsembleTrainer:
 
                 # 阶段切换提示
                 if stage_num != current_stage:
+                    # 共享 backbone: 在从 Stage 1 切换到 Stage 2 时广播
+                    if (
+                        stage_num == 2
+                        and current_stage == 1
+                        and self.share_warmup_backbone
+                    ):
+                        self._broadcast_warmup_backbone()
+
                     current_stage = stage_num
                     self.logger.info("")
                     self.logger.info("=" * 70)
@@ -386,6 +400,19 @@ class StagedEnsembleTrainer:
             if self.writer:
                 self.writer.close()
 
+    def _broadcast_warmup_backbone(self):
+        """从第一个模型获取 backbone，广播到所有子模型并重新初始化各自的 classifier head"""
+        # 使用第一个 worker 的第一个模型作为源
+        source_model = self.workers[0].models[0]
+        backbone_state = source_model.get_backbone_state_dict()
+
+        for worker in self.workers:
+            worker.broadcast_backbone_and_reinit_heads(backbone_state)
+
+        self.logger.info(
+            "🔄 Shared warmup backbone to all models, re-initialized classifier heads"
+        )
+
     def _save_checkpoint(self, tag: str):
         """保存checkpoint"""
         checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
@@ -471,6 +498,7 @@ def train_experiment(
     use_curriculum: Optional[bool] = None,
     fixed_ratio: Optional[float] = None,
     fixed_prob: Optional[float] = None,
+    share_warmup_backbone: Optional[bool] = None,
     resume: Optional[str] = None,
 ) -> Tuple["StagedEnsembleTrainer", float]:
     """
@@ -484,6 +512,7 @@ def train_experiment(
         use_curriculum: 是否使用课程学习 (None=使用cfg默认)
         fixed_ratio: 固定遮挡比例 (仅在use_curriculum=False时生效)
         fixed_prob: 固定遮挡概率 (仅在use_curriculum=False时生效)
+        share_warmup_backbone: 是否在warmup后共享backbone (节省FLOPs)
         resume: 恢复checkpoint的路径
 
     返回:
@@ -493,6 +522,9 @@ def train_experiment(
     curriculum = use_curriculum if use_curriculum is not None else True
     f_ratio = fixed_ratio if fixed_ratio is not None else 0.25
     f_prob = fixed_prob if fixed_prob is not None else 0.5
+    share_backbone = (
+        share_warmup_backbone if share_warmup_backbone is not None else False
+    )
 
     trainer = StagedEnsembleTrainer(
         experiment_name,
@@ -501,6 +533,7 @@ def train_experiment(
         use_curriculum=curriculum,
         fixed_ratio=f_ratio,
         fixed_prob=f_prob,
+        share_warmup_backbone=share_backbone,
     )
 
     # 恢复训练

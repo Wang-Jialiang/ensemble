@@ -218,6 +218,18 @@ class GPUWorker:
                 if scheduler and state.get("scheduler_state_dict"):
                     scheduler.load_state_dict(state["scheduler_state_dict"])
 
+    def broadcast_backbone_and_reinit_heads(self, backbone_state_dict: dict):
+        """用共享 backbone 初始化所有模型，并重新初始化各模型的 classifier head
+
+        Args:
+            backbone_state_dict: 源模型的 backbone 权重 (不含 fc 层)
+        """
+        for model in self.models:
+            # 加载 backbone 权重 (strict=False 因为不含 fc 层)
+            model.load_state_dict(backbone_state_dict, strict=False)
+            # 重新初始化 classifier head
+            model.reinit_classifier()
+
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 训练历史保存器                                                               ║

@@ -16,17 +16,14 @@ from torch.utils.data import DataLoader
 from ..config import Config
 from ..utils import ensure_dir, format_duration, get_logger
 from .adversarial import evaluate_adversarial
-from .core import (
-    CheckpointLoader,
-    MetricsCalculator,
-    extract_models,
-    get_all_models_logits,
-    get_ensemble_fn,
-)
+from .checkpoint import CheckpointLoader
+from .corruption_robustness import evaluate_corruption
 from .gradcam import GradCAMAnalyzer, ModelListWrapper
+from .inference import get_all_models_logits
 from .landscape import LossLandscapeVisualizer
-from .robustness import evaluate_corruption
+from .metrics import MetricsCalculator
 from .saver import ResultsSaver
+from .strategies import get_ensemble_fn
 from .visualizer import ReportVisualizer
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -37,15 +34,12 @@ from .visualizer import ReportVisualizer
 class ReportGenerator:
     """实验评估与报告生成器
 
-    使用方式:
-        ReportGenerator.evaluate_and_report(
-            trainers=[trainer1, trainer2],
-            test_loader=test_loader,
-            cfg=cfg,
-            save_dir=cfg.save_dir,
-            corruption_dataset=corruption_ds,  # 可选
-            run_gradcam=True,                  # 可选
-        )
+    两种主要使用方式:
+        1. 从内存评估 (训练后立即评估):
+           ReportGenerator.evaluate_trainers(trainers=[...], ...)
+
+        2. 从磁盘评估 (加载 checkpoint):
+           ReportGenerator.evaluate_checkpoints(checkpoint_paths=[...], ...)
     """
 
     @staticmethod
@@ -141,7 +135,7 @@ class ReportGenerator:
         run_adversarial: bool = True,
     ) -> Dict[str, Any]:
         """评估单个 trainer 并返回结果字典"""
-        models, device = extract_models(trainer)
+        models, device = get_models_from_source(trainer)
         return ReportGenerator._evaluate_models(
             models=models,
             exp_name=trainer.name,
@@ -294,7 +288,7 @@ class ReportGenerator:
         get_logger().info(f"✅ All results saved to: {save_dir}")
 
     @classmethod
-    def evaluate_and_report(
+    def evaluate_trainers(
         cls,
         trainers: List,  # List of StagedEnsembleTrainer instances
         test_loader: DataLoader,
@@ -304,7 +298,11 @@ class ReportGenerator:
         run_gradcam: bool = False,
         run_adversarial: bool = True,
     ):
-        """评估多个 trainer 并生成报告 (一步完成)"""
+        """
+        从内存评估多个 trainer 并生成报告
+
+        适用场景: 训练刚完成，模型还在内存中
+        """
         get_logger().info(
             f"\n{'=' * 80}\n📊 EVALUATION MODE | Models: {len(trainers)}\n{'=' * 80}"
         )
@@ -332,7 +330,7 @@ class ReportGenerator:
         cls._save_and_print(results, save_dir)
 
     @classmethod
-    def generate_from_checkpoints(
+    def evaluate_checkpoints(
         cls,
         checkpoint_paths: List[str],
         test_loader: DataLoader,
@@ -344,8 +342,9 @@ class ReportGenerator:
         run_adversarial: bool = True,
     ):
         """
-        从 checkpoint 直接评估并生成完整可视化报告
+        从磁盘加载 checkpoint 并评估
 
+        适用场景: 评估已保存的模型，与训练解耦
         这是 evaluation 模块的主入口，完全独立于 training 模块。
         """
         get_logger().info(f"\n{'=' * 80}")

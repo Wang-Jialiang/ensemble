@@ -3,7 +3,7 @@
 数据集基类模块
 ================================================================================
 
-包含: BasePreloadedDataset 基类、CORRUPTIONS 常量
+包含: BasePreloadedDataset 基类
 """
 
 import os
@@ -17,30 +17,6 @@ from ..utils import get_logger
 # SSL 证书验证修复 (可通过环境变量 DISABLE_SSL_VERIFY=1 启用)
 if os.environ.get("DISABLE_SSL_VERIFY", "0") == "1":
     ssl._create_default_https_context = ssl._create_unverified_context
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ 全局常量定义                                                                 ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-# 15种标准Corruption类型 (与ImageNet-C一致)
-CORRUPTIONS = [
-    "gaussian_noise",
-    "shot_noise",
-    "impulse_noise",
-    "defocus_blur",
-    "glass_blur",
-    "motion_blur",
-    "zoom_blur",
-    "snow",
-    "frost",
-    "fog",
-    "brightness",
-    "contrast",
-    "elastic_transform",
-    "pixelate",
-    "jpeg_compression",
-]
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗

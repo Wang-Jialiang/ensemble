@@ -4,9 +4,9 @@
 ================================================================================
 
 模块化数据集包，包含：
-- base: BasePreloadedDataset 基类、CORRUPTIONS 常量
+- base: BasePreloadedDataset 基类
 - preloaded: PreloadedCIFAR10, PreloadedEuroSAT, DATASET_REGISTRY
-- corruption: CorruptionDataset
+- corruption: CorruptionDataset, CORRUPTIONS 常量
 - ood: OODDataset, OOD_REGISTRY
 - domain: DomainShiftDataset, DOMAIN_REGISTRY
 - loader: load_dataset
@@ -17,14 +17,11 @@
     from ensemble.datasets import CorruptionDataset, OODDataset
 """
 
-# 基类和常量
-from .base import (
-    CORRUPTIONS,
-    BasePreloadedDataset,
-)
+# 基类
+from .base import BasePreloadedDataset
 
 # Corruption 数据集
-from .corruption import CorruptionDataset
+from .corruption import CORRUPTIONS, CorruptionDataset
 
 # Domain Shift 数据集
 from .domain import (
@@ -53,15 +50,15 @@ from .preloaded import (
 
 __all__ = [
     # Base
-    "CORRUPTIONS",
     "BasePreloadedDataset",
+    # Corruption
+    "CORRUPTIONS",
+    "CorruptionDataset",
     # Preloaded
     "DATASET_REGISTRY",
     "PreloadedCIFAR10",
     "PreloadedEuroSAT",
     "register_dataset",
-    # Corruption
-    "CorruptionDataset",
     # OOD
     "OOD_REGISTRY",
     "OODDataset",

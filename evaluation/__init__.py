@@ -4,8 +4,13 @@
 ================================================================================
 
 模块化评估包，包含：
-- core: 集成策略、CKA、MetricsCalculator、模型提取、Checkpoint 加载
-- robustness: Corruption + 域偏移评估
+- strategies: 集成策略 (mean, voting)
+- cka: CKA 相似度计算
+- inference: 模型提取与推理
+- metrics: MetricsCalculator 指标计算
+- checkpoint: Checkpoint 加载器
+- corruption_robustness: Corruption 鲁棒性评估
+- domain_robustness: Domain Shift 鲁棒性评估
 - adversarial: 对抗攻击 (FGSM/PGD) + 对抗鲁棒性评估
 - ood: OOD 检测评估
 - gradcam: GradCAM 热力图分析
@@ -18,24 +23,24 @@
     from ensemble.evaluation import ReportGenerator, evaluate_adversarial
 """
 
-# 核心模块 (含 Checkpoint 加载)
 # 对抗鲁棒性评估
 from .adversarial import (
     evaluate_adversarial,
     fgsm_attack,
     pgd_attack,
 )
-from .core import (
-    ENSEMBLE_STRATEGIES,
-    CheckpointLoader,
-    EnsembleFn,
-    MetricsCalculator,
-    compute_ensemble_cka,
-    extract_models,
-    get_all_models_logits,
-    get_ensemble_fn,
-    linear_cka,
-)
+
+# Checkpoint 加载器
+from .checkpoint import CheckpointLoader
+
+# CKA 相似度
+from .cka import compute_ensemble_cka, linear_cka
+
+# Corruption 鲁棒性评估
+from .corruption_robustness import evaluate_corruption
+
+# Domain Shift 鲁棒性评估
+from .domain_robustness import evaluate_domain_shift
 
 # GradCAM
 from .gradcam import (
@@ -45,33 +50,54 @@ from .gradcam import (
     get_target_layer,
 )
 
+# Grouped 策略 (扩展)
+from .grouped_strategy import (
+    create_grouped_fn,
+    create_hierarchical_voting_fn,
+    grouped_mean,
+    hierarchical_voting,
+    weighted_grouped_mean,
+)
+
+# 模型推理
+from .inference import get_all_models_logits, get_models_from_source
+
 # Loss Landscape
 from .landscape import LossLandscapeVisualizer
 
+# 指标计算器
+from .metrics import MetricsCalculator
+
 # OOD 检测
 from .ood import evaluate_ood
+
+# 报告生成
 from .report import ReportGenerator
 
-# 鲁棒性评估 (Corruption + 域偏移)
-from .robustness import (
-    evaluate_corruption,
-    evaluate_domain_shift,
-)
+# 结果保存
 from .saver import ResultsSaver
 
-# 可视化与报告
+# 集成策略
+from .strategies import ENSEMBLE_STRATEGIES, EnsembleFn, get_ensemble_fn
+
+# 可视化
 from .visualizer import ReportVisualizer
 
 __all__ = [
-    # Core
+    # Strategies
     "ENSEMBLE_STRATEGIES",
     "EnsembleFn",
     "get_ensemble_fn",
+    # CKA
     "linear_cka",
     "compute_ensemble_cka",
-    "MetricsCalculator",
-    "extract_models",
+    # Inference
+    "get_models_from_source",
     "get_all_models_logits",
+    # Metrics
+    "MetricsCalculator",
+    # Checkpoint
+    "CheckpointLoader",
     # Robustness
     "evaluate_corruption",
     "evaluate_domain_shift",
@@ -88,10 +114,14 @@ __all__ = [
     "ModelListWrapper",
     # Landscape
     "LossLandscapeVisualizer",
-    # Checkpoint
-    "CheckpointLoader",
     # Visualization & Reporting
     "ReportVisualizer",
     "ResultsSaver",
     "ReportGenerator",
+    # Grouped Strategies
+    "grouped_mean",
+    "weighted_grouped_mean",
+    "hierarchical_voting",
+    "create_grouped_fn",
+    "create_hierarchical_voting_fn",
 ]

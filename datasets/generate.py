@@ -21,7 +21,8 @@ from typing import Optional
 import numpy as np
 
 from ..utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
-from .core import CORRUPTIONS, DATASET_REGISTRY
+from .corruption import CORRUPTIONS
+from .preloaded import DATASET_REGISTRY
 
 # =============================================================================
 # Corruption 生成器

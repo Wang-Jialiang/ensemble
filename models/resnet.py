@@ -255,3 +255,17 @@ class ResNet(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self._forward_impl(x)
+
+    def get_backbone_state_dict(self) -> dict:
+        """获取 backbone 权重 (不含 fc 层)
+
+        Returns:
+            dict: 不包含 'fc.' 开头键的 state_dict
+        """
+        return {k: v for k, v in self.state_dict().items() if not k.startswith("fc.")}
+
+    def reinit_classifier(self) -> None:
+        """使用 Kaiming 初始化重新初始化 classifier head (fc 层)"""
+        nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
+        if self.fc.bias is not None:
+            nn.init.constant_(self.fc.bias, 0)

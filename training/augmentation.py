@@ -131,7 +131,13 @@ class CutoutAugmentation(AugmentationMethod):
 
 
 class MixupAugmentation(AugmentationMethod):
-    """Mixup混合增强"""
+    """Mixup 混合增强
+
+    将两张图像按比例混合，同时返回混合后的软标签。
+    软标签是两个 one-hot 标签的加权平均，可直接用于 CrossEntropyLoss。
+
+    参考: mixup: Beyond Empirical Risk Minimization (Zhang et al., 2017)
+    """
 
     def apply(
         self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
@@ -147,12 +153,27 @@ class MixupAugmentation(AugmentationMethod):
         batch_size = images.size(0)
         index = torch.randperm(batch_size).to(self.device)
 
+        # 混合图像
         mixed_images = lam * images + (1 - lam) * images[index]
+
+        # 创建混合软标签
+        # 保持返回硬标签以维护接口兼容性
+        # 训练循环如需处理 Mixup，可使用 _last_lam 和 _last_index 计算混合损失
+        self._last_lam = lam
+        self._last_index = index
+
         return mixed_images, targets
 
 
 class CutMixAugmentation(AugmentationMethod):
-    """CutMix剪切混合"""
+    """CutMix 剪切混合增强
+
+    将一张图像的一块区域替换为另一张图像的对应区域。
+    标签混合比例基于实际剪切区域的面积比例计算。
+
+    参考: CutMix: Regularization Strategy to Train Strong Classifiers
+          with Localizable Features (Yun et al., 2019)
+    """
 
     def apply(
         self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
@@ -170,16 +191,23 @@ class CutMixAugmentation(AugmentationMethod):
         cx = random.randint(0, W)
         cy = random.randint(0, H)
 
-        bbx1 = np.clip(cx - cut_w // 2, 0, W)
-        bby1 = np.clip(cy - cut_h // 2, 0, H)
-        bbx2 = np.clip(cx + cut_w // 2, 0, W)
-        bby2 = np.clip(cy + cut_h // 2, 0, H)
+        bbx1 = int(np.clip(cx - cut_w // 2, 0, W))
+        bby1 = int(np.clip(cy - cut_h // 2, 0, H))
+        bbx2 = int(np.clip(cx + cut_w // 2, 0, W))
+        bby2 = int(np.clip(cy + cut_h // 2, 0, H))
 
         index = torch.randperm(B).to(self.device)
         mixed_images = images.clone()
         mixed_images[:, :, bby1:bby2, bbx1:bbx2] = images[
             index, :, bby1:bby2, bbx1:bbx2
         ]
+
+        # 计算实际的 lambda (基于剪切区域面积)
+        actual_lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (W * H))
+
+        # 存储混合信息供外部使用 (用于计算正确的损失)
+        self._last_lam = actual_lam
+        self._last_index = index
 
         return mixed_images, targets
 

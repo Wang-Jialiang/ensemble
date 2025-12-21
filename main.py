@@ -53,7 +53,7 @@ def run_eval_mode(
     """评估模式 - 加载模型并生成报告"""
     checkpoint_paths = [ckpt["path"] for ckpt in eval_checkpoints]
 
-    ReportGenerator.generate_from_checkpoints(
+    ReportGenerator.evaluate_checkpoints(
         checkpoint_paths=checkpoint_paths,
         test_loader=test_loader,
         cfg=base_cfg,

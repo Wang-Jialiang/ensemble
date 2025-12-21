@@ -3,7 +3,7 @@
 Corruption 数据集模块
 ================================================================================
 
-包含: CorruptionDataset
+包含: CorruptionDataset, CORRUPTIONS 常量
 """
 
 import tarfile
@@ -16,8 +16,31 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from ..utils import DEFAULT_DATA_ROOT, ensure_dir, get_logger
-from .base import CORRUPTIONS
 from .preloaded import DATASET_REGISTRY
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ 全局常量定义                                                                 ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# 15种标准Corruption类型 (与ImageNet-C一致)
+CORRUPTIONS = [
+    "gaussian_noise",
+    "shot_noise",
+    "impulse_noise",
+    "defocus_blur",
+    "glass_blur",
+    "motion_blur",
+    "zoom_blur",
+    "snow",
+    "frost",
+    "fog",
+    "brightness",
+    "contrast",
+    "elastic_transform",
+    "pixelate",
+    "jpeg_compression",
+]
+
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Corruption数据集                                                              ║
