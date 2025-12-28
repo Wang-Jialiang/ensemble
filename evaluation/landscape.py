@@ -34,8 +34,9 @@ class LossLandscapeVisualizer:
     依赖: pip install loss-landscapes
     """
 
-    def __init__(self, save_dir: str):
+    def __init__(self, save_dir: str, dpi: int = 150):
         self.save_dir = Path(save_dir)
+        self.dpi = dpi
         ensure_dir(self.save_dir)
         self.logger = get_logger()
 
@@ -138,7 +139,7 @@ class LossLandscapeVisualizer:
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
 
         self.logger.info(f"📊 Saved: {filename}")
@@ -190,7 +191,7 @@ class LossLandscapeVisualizer:
         ax.set_ylabel("Direction 2")
         ax.set_title(f"2D Loss Landscape around {model_name}")
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         self.logger.info(f"📊 Saved: {filename}")
 
@@ -217,7 +218,7 @@ class LossLandscapeVisualizer:
 
         filename_3d = filename.replace(".png", "_3d.png")
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename_3d, dpi=150)
+        plt.savefig(self.save_dir / filename_3d, dpi=self.dpi)
         plt.close()
         self.logger.info(f"📊 Saved: {filename_3d}")
 
@@ -278,7 +279,7 @@ class LossLandscapeVisualizer:
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150, bbox_inches="tight")
+        plt.savefig(self.save_dir / filename, dpi=self.dpi, bbox_inches="tight")
         plt.close()
 
         self.logger.info(f"📊 Saved: {filename}")
@@ -348,7 +349,7 @@ class LossLandscapeVisualizer:
 
         ax.set_title("Model Parameter Space Distances")
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
 
         self.logger.info(f"📊 Saved: {filename}")

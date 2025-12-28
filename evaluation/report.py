@@ -7,7 +7,12 @@
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from ..datasets.robustness.corruption import CorruptionDataset
+    from ..datasets.robustness.domain import DomainShiftDataset
+    from ..datasets.robustness.ood import OODDataset
 
 import torch
 import torch.nn as nn
@@ -18,10 +23,12 @@ from ..utils import ensure_dir, format_duration, get_logger
 from .adversarial import evaluate_adversarial
 from .checkpoint import CheckpointLoader
 from .corruption_robustness import evaluate_corruption
+from .domain_robustness import evaluate_domain_shift
 from .gradcam import GradCAMAnalyzer, ModelListWrapper
-from .inference import get_all_models_logits
+from .inference import get_all_models_logits, get_models_from_source
 from .landscape import LossLandscapeVisualizer
 from .metrics import MetricsCalculator
+from .ood import evaluate_ood
 from .saver import ResultsSaver
 from .strategies import get_ensemble_fn
 from .visualizer import ReportVisualizer
@@ -65,6 +72,8 @@ class ReportGenerator:
         device: torch.device,
         training_time: float = 0.0,
         corruption_dataset: Optional["CorruptionDataset"] = None,
+        ood_dataset: Optional["OODDataset"] = None,
+        domain_dataset: Optional["DomainShiftDataset"] = None,
         run_gradcam: bool = False,
         run_adversarial: bool = True,
     ) -> Dict[str, Any]:
@@ -90,7 +99,28 @@ class ReportGenerator:
         if corruption_dataset is not None:
             get_logger().info("   🔍 Corruption evaluation...")
             corruption_results = evaluate_corruption(
-                models, corruption_dataset, batch_size=cfg.batch_size
+                models, corruption_dataset, config=cfg
+            )
+
+        # OOD 评估
+        ood_results = None
+        if ood_dataset is not None:
+            get_logger().info("   🔍 OOD detection evaluation...")
+            ood_loader = ood_dataset.get_loader(config=cfg)
+            ood_results = evaluate_ood(
+                models, test_loader, ood_loader, ood_name=ood_dataset.name
+            )
+
+        # Domain Shift 评估
+        domain_results = None
+        if domain_dataset is not None:
+            get_logger().info("   🔍 Domain shift evaluation...")
+            domain_loader = domain_dataset.get_loader(config=cfg)
+            domain_results = evaluate_domain_shift(
+                models,
+                domain_loader,
+                domain_name=domain_dataset.name,
+                num_classes=cfg.num_classes,
             )
 
         # 对抗鲁棒性评估
@@ -100,9 +130,9 @@ class ReportGenerator:
             adversarial_results = evaluate_adversarial(
                 models,
                 test_loader,
-                eps=getattr(cfg, "adv_eps", 8 / 255),
-                alpha=getattr(cfg, "adv_alpha", 2 / 255),
-                pgd_steps=getattr(cfg, "adv_pgd_steps", 10),
+                eps=cfg.adv_eps,
+                alpha=cfg.adv_alpha,
+                pgd_steps=cfg.adv_pgd_steps,
                 dataset_name=cfg.dataset_name,
             )
 
@@ -121,6 +151,8 @@ class ReportGenerator:
             "training_time_seconds": training_time,
             "standard_metrics": standard_metrics,
             "corruption_results": corruption_results,
+            "ood_results": ood_results,
+            "domain_results": domain_results,
             "adversarial_results": adversarial_results,
             "gradcam_metrics": gradcam_metrics,
         }
@@ -323,7 +355,7 @@ class ReportGenerator:
 
         # 生成可视化图表
         get_logger().info("\n📊 Generating visualizations...")
-        visualizer = ReportVisualizer(save_dir)
+        visualizer = ReportVisualizer(save_dir, dpi=cfg.plot_dpi)
         visualizer.generate_all(results)
 
         # 生成并保存报告
@@ -335,8 +367,9 @@ class ReportGenerator:
         checkpoint_paths: List[str],
         test_loader: DataLoader,
         cfg: Config,
-        output_dir: str,
         corruption_dataset: Optional["CorruptionDataset"] = None,
+        ood_dataset: Optional["OODDataset"] = None,
+        domain_dataset: Optional["DomainShiftDataset"] = None,
         run_gradcam: bool = False,
         run_loss_landscape: bool = False,
         run_adversarial: bool = True,
@@ -353,6 +386,7 @@ class ReportGenerator:
         )
         get_logger().info(f"{'=' * 80}")
 
+        output_dir = cfg.save_dir
         ensure_dir(output_dir)
         results = {}
         all_models = {}  # 收集所有实验的模型用于 Loss Landscape
@@ -376,6 +410,8 @@ class ReportGenerator:
                 device=device,
                 training_time=ctx["training_time"],
                 corruption_dataset=corruption_dataset,
+                ood_dataset=ood_dataset,
+                domain_dataset=domain_dataset,
                 run_gradcam=run_gradcam,
                 run_adversarial=run_adversarial,
             )
@@ -384,13 +420,13 @@ class ReportGenerator:
 
         # 生成可视化图表
         get_logger().info("\n📊 Generating visualizations...")
-        visualizer = ReportVisualizer(output_dir)
+        visualizer = ReportVisualizer(output_dir, dpi=cfg.plot_dpi)
         visualizer.generate_all(results)
 
         # Loss Landscape 分析
         if run_loss_landscape and all_models:
             get_logger().info("\n🏔️ Generating Loss Landscape visualizations...")
-            landscape_viz = LossLandscapeVisualizer(output_dir)
+            landscape_viz = LossLandscapeVisualizer(output_dir, dpi=cfg.plot_dpi)
 
             for exp_name, models in all_models.items():
                 # 模型参数距离热力图 (无需 loss-landscapes 依赖)

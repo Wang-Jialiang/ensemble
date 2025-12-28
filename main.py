@@ -4,6 +4,10 @@
 ================================================================================
 """
 
+import sys
+
+sys.dont_write_bytecode = True  # 禁用 __pycache__ 生成
+
 import argparse
 from pathlib import Path
 from typing import List
@@ -27,18 +31,12 @@ def run_train_mode(
         get_logger().info(f"\n🧪 [{idx}/{len(experiments)}] {exp.name} - {exp.desc}")
 
         cfg = base_cfg.apply_quick_test() if base_cfg.quick_test else base_cfg
-        cfg = cfg.copy(experiment_name=exp.name, **exp.get_overrides())
+        cfg = cfg.copy(experiment_name=exp.name, **exp.get_config_overrides())
 
         train_experiment(
-            experiment_name=exp.name,
             cfg=cfg,
             train_loader=train_loader,
             val_loader=val_loader,
-            augmentation_method=exp.augmentation,
-            use_curriculum=exp.use_curriculum,
-            fixed_ratio=exp.fixed_ratio,
-            fixed_prob=exp.fixed_prob,
-            resume=base_cfg.resume_from if idx == 1 else None,
         )
     get_logger().info(f"\n✅ 完成 | Checkpoints -> {base_cfg.save_dir}/checkpoints/")
 
@@ -48,7 +46,10 @@ def run_eval_mode(
     eval_checkpoints: list,
     test_loader,
     corruption_dataset,
-    run_loss_landscape: bool = False,
+    ood_dataset,
+    domain_dataset,
+    run_gradcam: bool,
+    run_loss_landscape: bool,
 ):
     """评估模式 - 加载模型并生成报告"""
     checkpoint_paths = [ckpt["path"] for ckpt in eval_checkpoints]
@@ -57,9 +58,10 @@ def run_eval_mode(
         checkpoint_paths=checkpoint_paths,
         test_loader=test_loader,
         cfg=base_cfg,
-        output_dir=base_cfg.save_dir,
         corruption_dataset=corruption_dataset,
-        run_gradcam=True,
+        ood_dataset=ood_dataset,
+        domain_dataset=domain_dataset,
+        run_gradcam=run_gradcam,
         run_loss_landscape=run_loss_landscape,
     )
 
@@ -74,12 +76,13 @@ def main():
     parser.add_argument(
         "--loss-landscape", action="store_true", help="生成 Loss Landscape 可视化"
     )
+    parser.add_argument("--gradcam", action="store_true", help="生成 Grad-CAM 可视化")
     args = parser.parse_args()
 
     # 加载配置
     cfg_path = Path(args.config)
     if not cfg_path.exists():
-        cfg_path = Path(__file__).parent / "configs" / args.config
+        cfg_path = Path(__file__).parent / "config" / args.config
 
     base_cfg, experiments, eval_ckpts = Config.load_yaml(str(cfg_path))
 
@@ -95,17 +98,23 @@ def main():
 
     if args.eval:
         if not eval_ckpts:
-            return get_logger().error("❌ 请在 config.yaml 中指定 eval_checkpoints")
-        _, _, test_loader, corruption_dataset = load_dataset(base_cfg)
+            get_logger().error("❌ 请在 config.yaml 中指定 eval_checkpoints")
+            sys.exit(1)
+        _, _, test_loader, corruption_dataset, ood_dataset, domain_dataset = (
+            load_dataset(base_cfg)
+        )
         run_eval_mode(
             base_cfg,
             eval_ckpts,
             test_loader,
             corruption_dataset,
-            run_loss_landscape=args.loss_landscape,
+            ood_dataset,
+            domain_dataset,
+            args.gradcam,
+            args.loss_landscape,
         )
     else:
-        train_loader, val_loader, _, _ = load_dataset(base_cfg)
+        train_loader, val_loader, _, _, _, _ = load_dataset(base_cfg)
         run_train_mode(base_cfg, experiments, train_loader, val_loader)
 
 

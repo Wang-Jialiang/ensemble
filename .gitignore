@@ -34,3 +34,7 @@ wheels/
 # Data & outputs (optional, uncomment if needed)
 # data/
 # outputs/
+
+# System files
+.DS_Store
+Thumbs.db

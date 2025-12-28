@@ -6,7 +6,11 @@ Corruption 鲁棒性评估模块
 包含: evaluate_corruption 函数
 """
 
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from ...config.core import Config
+    from ...datasets.robustness.corruption import CorruptionDataset
 
 import numpy as np
 
@@ -21,8 +25,7 @@ from .inference import get_all_models_logits, get_models_from_source
 def evaluate_corruption(
     trainer_or_models: Any,
     corruption_dataset: "CorruptionDataset",
-    batch_size: int = 128,
-    num_workers: int = 4,
+    config: "Config",
     logger: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
@@ -57,8 +60,7 @@ def evaluate_corruption(
             loader = corruption_dataset.get_loader(
                 corruption,
                 severity=severity,
-                batch_size=batch_size,
-                num_workers=num_workers,
+                config=config,
             )
 
             # 只需预测，不需要详细的 Calculator (只算 Acc)

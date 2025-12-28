@@ -21,8 +21,9 @@ from ..utils import ensure_dir, get_logger
 class ReportVisualizer:
     """生成可视化图表 (matplotlib)"""
 
-    def __init__(self, save_dir: str):
+    def __init__(self, save_dir: str, dpi: int = 150):
         self.save_dir = Path(save_dir)
+        self.dpi = dpi
         ensure_dir(self.save_dir)
 
     def plot_accuracy_comparison(
@@ -58,7 +59,7 @@ class ReportVisualizer:
         ax.grid(axis="y", alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
@@ -87,7 +88,7 @@ class ReportVisualizer:
         ax2.tick_params(axis="x", rotation=45)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
@@ -129,7 +130,7 @@ class ReportVisualizer:
         ax3.tick_params(axis="x", rotation=45)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
@@ -182,7 +183,7 @@ class ReportVisualizer:
         plt.colorbar(im, ax=ax, label="Accuracy (%)")
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
@@ -217,7 +218,7 @@ class ReportVisualizer:
         ax.grid(axis="y", alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
@@ -251,7 +252,7 @@ class ReportVisualizer:
             )
 
         plt.tight_layout()
-        plt.savefig(self.save_dir / filename, dpi=150)
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 

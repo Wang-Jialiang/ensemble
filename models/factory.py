@@ -38,7 +38,7 @@ def init_kaiming(model: nn.Module) -> None:
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
@@ -114,18 +114,18 @@ def get_supported_inits() -> List[str]:
 MODEL_REGISTRY = {}
 
 
-def register_model(name: str, supports_cifar: bool = False):
+def register_model(name: str):
     """
     模型注册装饰器
 
     使用方式:
-    @register_model('resnet18', supports_cifar=True)
-    def resnet18(num_classes, pretrained):
+    @register_model('resnet18')
+    def resnet18(num_classes):
         ...
     """
 
     def decorator(builder_fn):
-        MODEL_REGISTRY[name] = {"builder": builder_fn, "supports_cifar": supports_cifar}
+        MODEL_REGISTRY[name] = builder_fn
         return builder_fn
 
     return decorator
@@ -136,29 +136,29 @@ def register_model(name: str, supports_cifar: bool = False):
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-@register_model("resnet18", supports_cifar=True)
+@register_model("resnet18")
 def resnet18(num_classes: int):
     return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
 
 
-@register_model("resnet34", supports_cifar=True)
+@register_model("resnet34")
 def resnet34(num_classes: int):
     return ResNet(BasicBlock, [3, 4, 6, 3], num_classes=num_classes)
 
 
-@register_model("resnet50", supports_cifar=True)
+@register_model("resnet50")
 def resnet50(num_classes: int):
     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes=num_classes)
 
 
-@register_model("vgg16", supports_cifar=False)
+@register_model("vgg16")
 def vgg16(num_classes: int):
     from torchvision.models import vgg16 as tv_vgg16
 
     return tv_vgg16(num_classes=num_classes)
 
 
-@register_model("efficientnet_b0", supports_cifar=False)
+@register_model("efficientnet_b0")
 def efficientnet_b0(num_classes: int):
     from torchvision.models import efficientnet_b0 as tv_effnet
 
@@ -200,8 +200,8 @@ class ModelFactory:
                 f"不支持的模型: {model_name}. 支持: {list(MODEL_REGISTRY.keys())}"
             )
 
-        config = MODEL_REGISTRY[model_name]
-        model = config["builder"](num_classes, **kwargs)
+        builder = MODEL_REGISTRY[model_name]
+        model = builder(num_classes, **kwargs)
 
         # 应用自定义初始化 (如果指定)
         if init_method is not None:
@@ -213,35 +213,3 @@ class ModelFactory:
     def get_supported_models() -> List[str]:
         """获取支持的模型列表"""
         return list(MODEL_REGISTRY.keys())
-
-    @staticmethod
-    def check_compatibility(model_name: str, dataset_name: str) -> List[str]:
-        """
-        检查模型与数据集的兼容性
-
-        Args:
-            model_name: 模型名称
-            dataset_name: 数据集名称
-
-        Returns:
-            warnings: 警告信息列表
-        """
-        warnings = []
-        model_name = model_name.lower()
-        dataset_name = dataset_name.lower()
-
-        if model_name not in MODEL_REGISTRY:
-            return warnings  # 让create_model处理未知模型错误
-
-        model_info = MODEL_REGISTRY[model_name]
-        is_small_image = "cifar" in dataset_name or "eurosat" in dataset_name
-
-        # 检查 supports_cifar 标记
-        if is_small_image and not model_info["supports_cifar"]:
-            warnings.append(
-                f"⚠️ Model '{model_name}' (supports_cifar=False) may not work well with "
-                f"small image dataset '{dataset_name}' (32x32 or 64x64). "
-                f"Consider using a ResNet model."
-            )
-
-        return warnings

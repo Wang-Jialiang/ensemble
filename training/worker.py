@@ -60,12 +60,17 @@ class GPUWorker:
                 model = torch.compile(model)
 
             # 使用工厂函数创建优化器和调度器
-            optimizer = create_optimizer(model, cfg.optimizer, cfg.lr, cfg.weight_decay)
+            optimizer = create_optimizer(
+                model,
+                cfg.optimizer,
+                cfg.lr,
+                cfg.weight_decay,
+                sgd_momentum=cfg.sgd_momentum,
+            )
             scheduler = create_scheduler(
                 optimizer,
                 cfg.scheduler,
                 cfg.total_epochs,
-                max_lr_factor=getattr(cfg, "onecycle_max_lr_factor", 10.0),
             )
 
             self.models.append(model)

@@ -11,7 +11,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.nn as nn
@@ -490,55 +490,36 @@ class StagedEnsembleTrainer:
 
 
 def train_experiment(
-    experiment_name: str,
     cfg: Config,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    augmentation_method: Optional[str] = None,
-    use_curriculum: Optional[bool] = None,
-    fixed_ratio: Optional[float] = None,
-    fixed_prob: Optional[float] = None,
-    share_warmup_backbone: Optional[bool] = None,
-    resume: Optional[str] = None,
 ) -> Tuple["StagedEnsembleTrainer", float]:
     """
     仅训练实验 (不包含评估)
 
+    所有增强参数从 cfg 读取:
+    - cfg.experiment_name: 实验名称
+    - cfg.augmentation_method: 增强方法
+    - cfg.use_curriculum: 是否使用课程学习
+    - cfg.fixed_ratio, cfg.fixed_prob: 固定遮挡参数
+    - cfg.share_warmup_backbone: 是否共享 backbone
+
     参数:
-        experiment_name: 实验名称
-        cfg: 配置对象
+        cfg: 配置对象 (包含所有实验参数)
         train_loader, val_loader: 数据加载器
-        augmentation_method: 增强方法 (None=使用cfg默认)
-        use_curriculum: 是否使用课程学习 (None=使用cfg默认)
-        fixed_ratio: 固定遮挡比例 (仅在use_curriculum=False时生效)
-        fixed_prob: 固定遮挡概率 (仅在use_curriculum=False时生效)
-        share_warmup_backbone: 是否在warmup后共享backbone (节省FLOPs)
-        resume: 恢复checkpoint的路径
 
     返回:
         (trainer, training_time)
     """
-    aug_method = augmentation_method or "perlin"
-    curriculum = use_curriculum if use_curriculum is not None else True
-    f_ratio = fixed_ratio if fixed_ratio is not None else 0.25
-    f_prob = fixed_prob if fixed_prob is not None else 0.5
-    share_backbone = (
-        share_warmup_backbone if share_warmup_backbone is not None else False
-    )
-
     trainer = StagedEnsembleTrainer(
-        experiment_name,
+        cfg.experiment_name,
         cfg,
-        augmentation_method=aug_method,
-        use_curriculum=curriculum,
-        fixed_ratio=f_ratio,
-        fixed_prob=f_prob,
-        share_warmup_backbone=share_backbone,
+        augmentation_method=cfg.augmentation_method,
+        use_curriculum=cfg.use_curriculum,
+        fixed_ratio=cfg.fixed_ratio,
+        fixed_prob=cfg.fixed_prob,
+        share_warmup_backbone=cfg.share_warmup_backbone,
     )
-
-    # 恢复训练
-    if resume:
-        trainer.load_checkpoint(resume)
 
     # 训练
     trainer.train(train_loader, val_loader)
@@ -548,9 +529,9 @@ def train_experiment(
     trainer.load_checkpoint("best")
     trainer.total_training_time = training_time
 
-    get_logger().info(f"\n✅ Training completed: {experiment_name}")
+    get_logger().info(f"\n✅ Training completed: {cfg.experiment_name}")
     get_logger().info(
-        f"   Checkpoint saved to: {Path(cfg.save_dir) / 'checkpoints' / experiment_name}"
+        f"   Checkpoint saved to: {Path(cfg.save_dir) / 'checkpoints' / cfg.experiment_name}"
     )
 
     return trainer, training_time

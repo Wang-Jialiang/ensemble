@@ -50,15 +50,6 @@ from .gradcam import (
     get_target_layer,
 )
 
-# Grouped 策略 (扩展)
-from .grouped_strategy import (
-    create_grouped_fn,
-    create_hierarchical_voting_fn,
-    grouped_mean,
-    hierarchical_voting,
-    weighted_grouped_mean,
-)
-
 # 模型推理
 from .inference import get_all_models_logits, get_models_from_source
 
@@ -118,10 +109,4 @@ __all__ = [
     "ReportVisualizer",
     "ResultsSaver",
     "ReportGenerator",
-    # Grouped Strategies
-    "grouped_mean",
-    "weighted_grouped_mean",
-    "hierarchical_voting",
-    "create_grouped_fn",
-    "create_hierarchical_voting_fn",
 ]

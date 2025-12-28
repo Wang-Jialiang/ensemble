@@ -42,5 +42,5 @@ ENSEMBLE_STRATEGIES: Dict[str, EnsembleFn] = {
 
 def get_ensemble_fn(cfg: "Config") -> EnsembleFn:
     """从配置获取集成函数"""
-    strategy = getattr(cfg, "ensemble_strategy", "mean")
+    strategy = cfg.ensemble_strategy
     return ENSEMBLE_STRATEGIES.get(strategy, ENSEMBLE_STRATEGIES["mean"])

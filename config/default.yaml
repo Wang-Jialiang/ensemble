@@ -2,79 +2,132 @@
 # 配置文件
 # ==============================================================================
 
+# ==============================================================================
+# 业界标准常量 - 通常无需修改
+# ==============================================================================
+constants:
+  # 数据集划分 (机器学习惯例)
+  val_split: 0.1                    # 验证集划分比例 (10%)
+  test_split: 0.2                   # 测试集划分比例 (20%)
+
+  # 优化器标准参数
+  weight_decay: 0.0001              # AdamW 推荐值 (Loshchilov & Hutter, 2019)
+  max_grad_norm: 1.0                # 梯度裁剪标准阈值
+  sgd_momentum: 0.9                 # SGD 动量标准值
+  label_smoothing: 0.1              # 标签平滑 (Szegedy et al., 2016)
+
+  # DataLoader 标准配置
+  pin_memory: true                  # GPU 训练必开
+  persistent_workers: true          # PyTorch 1.7+ 推荐
+
+  # 硬件加速 (现代 GPU 标配)
+  use_amp: true                     # 自动混合精度
+  use_tf32: true                    # TF32 加速 (Ampere+)
+  compile_model: true               # PyTorch 2.0+ 编译优化
+
+  # 对抗鲁棒性评估 (Madry et al., 2018; RobustBench)
+  adv_eps: 0.03137                  # ε = 8/255
+  adv_alpha: 0.00784                # α = 2/255
+  adv_pgd_steps: 10                 # PGD 标准迭代数
+
+  # 校准度评估 (Guo et al., 2017)
+  ece_n_bins: 15                    # ECE 分箱数
+
+  # 数据增强标准值
+  cutout_fill_value: 0.5            # 归一化后中性灰
+  perlin_persistence: 0.5           # Perlin 噪声标准持久度
+
+  # 可视化
+  plot_dpi: 300                     # 图表保存 DPI
+
+# ==============================================================================
+# 可调参数
+# ==============================================================================
 base:
-  # ========== 数据配置 ==========
-  data_root: "./data"
-  dataset_name: "cifar10"
-  val_split: 0.1
-  test_split: 0.2  # 用于没有官方划分的数据集 (如 EuroSAT)
+  # ==========================================================================
+  # [全局] 数据配置 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  data_root: "./data"               # 数据集根目录路径
+  save_root: "./outputs"             # 检查点/输出保存根目录
+  dataset_name: "cifar10"           # 数据集名称: "cifar10", "cifar100", "eurosat" 等
 
-  # ========== 模型配置 ==========
-  model_name: "resnet18"
-  num_models_per_gpu: 2
-  compile_model: false
+  # ==========================================================================
+  # [全局] 模型配置 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  model_name: "resnet18"            # 模型名称: "resnet18", "resnet50", "vgg16" 等
+  num_models_per_gpu: 3             # 每个 GPU 上的模型数量
 
-  # ========== 训练超参数 ==========
-  batch_size: 512
-  lr: 0.0015
-  weight_decay: 0.0001
-  max_grad_norm: 1.0
-  seed: 42
-  optimizer: "adamw"  # 优化器: "adamw", "sgd", "adam", "rmsprop"
-  scheduler: "cosine"  # 调度器: "cosine", "step", "plateau", "onecycle", "none"
-  label_smoothing: 0.1  # 标签平滑系数 (0.0=不使用, 0.1=常用值)
-  onecycle_max_lr_factor: 10.0  # OneCycleLR 最大学习率倍数
+  # ==========================================================================
+  # [全局] 训练超参数 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  batch_size: 512                   # 批次大小
+  lr: 0.0015                        # 基础学习率
+  seed: 42                          # 随机种子
+  optimizer: "adamw"                # 优化器: "adamw", "sgd", "adam", "rmsprop"
+  scheduler: "cosine"               # 调度器: "cosine", "step", "plateau", "none"
+  early_stopping_patience: 20       # 早停耐心值 (验证集无改善的轮数)
 
-  # ========== 三阶段训练参数 ==========
-  warmup_epochs: 20
-  progressive_epochs: 40
-  finetune_epochs: 20
+  # ==========================================================================
+  # [阶段训练专用] 三阶段与 Mask - 仅 StagedEnsembleTrainer 使用
+  # ==========================================================================
+  warmup_epochs: 20                 # Warmup 阶段轮数
+  progressive_epochs: 40            # Progressive 阶段轮数
+  finetune_epochs: 20               # Finetune 阶段轮数
+  mask_pool_size: 100               # 预生成的 Mask 池大小
+  mask_start_ratio: 0.15            # Progressive 阶段起始遮罩比例
+  mask_end_ratio: 0.35              # Progressive 阶段结束遮罩比例
+  mask_prob_start: 0.30             # Progressive 阶段起始应用概率
+  mask_prob_end: 0.70               # Progressive 阶段结束应用概率
+  finetune_mask_ratio: 0.25         # Finetune 阶段固定遮罩比例
+  finetune_mask_prob: 0.50          # Finetune 阶段固定应用概率
 
-  # ========== Mask 参数 ==========
-  mask_pool_size: 100
-  mask_start_ratio: 0.15
-  mask_end_ratio: 0.35
-  mask_prob_start: 0.30
-  mask_prob_end: 0.70
-  finetune_mask_ratio: 0.25
-  finetune_mask_prob: 0.50
+  # ==========================================================================
+  # [阶段训练专用] 阶段学习率缩放 - 仅 StagedEnsembleTrainer 使用
+  # ==========================================================================
+  warmup_lr_scale: 0.5              # Warmup 阶段学习率缩放因子 (lr * scale)
+  progressive_lr_scale: 1.0         # Progressive 阶段学习率缩放因子
+  finetune_lr_scale: 0.5            # Finetune 阶段学习率缩放因子
 
-  # ========== 阶段学习率缩放 ==========
-  warmup_lr_scale: 0.1  # Warmup阶段使用 lr * 0.1
-  progressive_lr_scale: 1.0  # Progressive阶段使用原始 lr
-  finetune_lr_scale: 0.1  # Finetune阶段使用 lr * 0.1
+  # ==========================================================================
+  # [全局] 数据加载配置 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  num_workers: 16                   # DataLoader 工作进程数
+  prefetch_factor: 4                # 每个 worker 预取的批次数
 
-  # ========== 数据加载配置 ==========
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 4
+  # ==========================================================================
+  # [全局] 保存与日志配置 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  save_every_n_epochs: 20           # 每 N 轮保存一次检查点
+  keep_last_n_checkpoints: 3        # 保留最近 N 个检查点
+  use_tensorboard: true             # 是否启用 TensorBoard 日志
+  log_level: "INFO"                 # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
 
-  # ========== 优化配置 ==========
-  use_amp: true
-  use_tf32: true
-  early_stopping_patience: 30
+  # ==========================================================================
+  # [评估专用] 评估配置 - 仅评估模块使用
+  # ==========================================================================
+  ensemble_strategy: "mean"         # 集成策略: "mean" (等权平均), "voting" (多数投票)
+  corruption_dataset: true          # 是否加载 Corruption 数据集进行评估
+  ood_dataset: false                # 是否加载 OOD 数据集进行评估
+  domain_dataset: false             # 是否加载 Domain Shift 数据集进行评估
 
-  # ========== 保存配置 ==========
-  save_dir: ""
-  save_every_n_epochs: 20
-  keep_last_n_checkpoints: 3
+  # ==========================================================================
+  # [全局] 模型初始化 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  init_method: "kaiming"            # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
-  # ========== 日志配置 ==========
-  use_tensorboard: true
-  log_level: "INFO"
-  ece_n_bins: 15
-  ensemble_strategy: "mean"  # 集成策略: "mean" (等权平均) 或 "voting" (多数投票)
+  # ==========================================================================
+  # [全局] 运行控制 - 被 BaseTrainer 及所有子类使用
+  # ==========================================================================
+  quick_test: false                 # 快速测试模式 (减少轮数/模型数)
 
-  # ========== 对抗鲁棒性评估配置 ==========
-  adv_eps: 0.03137  # 扰动强度 ε = 8/255 ≈ 0.031
-  adv_alpha: 0.00784  # PGD 步长 α = 2/255 ≈ 0.008
-  adv_pgd_steps: 10  # PGD 迭代步数
-  init_method: "kaiming"  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
-
-  # ========== 运行控制 ==========
-  quick_test: false
-  resume_from: ""
+  # ==========================================================================
+  # [实验级别] 增强与课程学习参数 - 每个实验可覆盖
+  # ==========================================================================
+  augmentation_method: "perlin"     # 增强方法: "perlin", "cutout", "none" 等
+  use_curriculum: true              # 是否使用课程学习
+  fixed_ratio: 0.25                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
+  fixed_prob: 0.5                   # 固定遮挡概率 (仅 use_curriculum=false 时生效)
+  share_warmup_backbone: false      # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
 
 # ==============================================================================
 # 实验列表
@@ -82,31 +135,31 @@ base:
 experiments:
   - name: "ExpD_Perlin_Curriculum"
     desc: "Perlin + Dual Curriculum (PROPOSED)"
-    augmentation: "perlin"
+    augmentation_method: "perlin"
     use_curriculum: true
 
   - name: "ExpA_Baseline"
     desc: "Baseline (No Augmentation)"
-    augmentation: "none"
+    augmentation_method: "none"
     use_curriculum: false
 
   - name: "ExpB_Cutout_Fixed"
     desc: "Cutout Fixed (ratio=25%, prob=50%)"
-    augmentation: "cutout"
+    augmentation_method: "cutout"
     use_curriculum: false
     fixed_ratio: 0.25
     fixed_prob: 0.5
 
   - name: "ExpC_Perlin_Fixed"
     desc: "Perlin Fixed (ratio=25%, prob=50%)"
-    augmentation: "perlin"
+    augmentation_method: "perlin"
     use_curriculum: false
     fixed_ratio: 0.25
     fixed_prob: 0.5
 
   - name: "ExpE_Cutout_Curriculum"
     desc: "Cutout + Dual Curriculum"
-    augmentation: "cutout"
+    augmentation_method: "cutout"
     use_curriculum: true
 
 # ==============================================================================

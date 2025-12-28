@@ -33,10 +33,13 @@ CUTOUT_FILL_VALUE = 0.5
 class CloudMaskGenerator:
     """GPU加速的云状Mask生成器"""
 
-    def __init__(self, height: int, width: int, device: torch.device):
+    def __init__(
+        self, height: int, width: int, device: torch.device, persistence: float = 0.5
+    ):
         self.h = height
         self.w = width
         self.device = device
+        self.persistence = persistence
         # base_scale 随图像尺寸动态调整: 32x32 -> 16, 64x64 -> 32
         self.base_scale = min(height, width) / 2.0
 
@@ -49,7 +52,7 @@ class CloudMaskGenerator:
             # 动态调整 octaves 参数
             scale = self.base_scale * random.uniform(0.8, 1.2)
             octaves = PERLIN_OCTAVES_LARGE if self.h >= 64 else PERLIN_OCTAVES_SMALL
-            persistence = 0.5
+            persistence = self.persistence
 
             noise = self._generate_perlin_noise(scale, octaves, persistence)
             # 使用target_ratio作为阈值
@@ -112,6 +115,10 @@ class AugmentationMethod:
 class CutoutAugmentation(AugmentationMethod):
     """Cutout硬遮挡"""
 
+    def __init__(self, device: torch.device, fill_value: float = CUTOUT_FILL_VALUE):
+        super().__init__(device)
+        self.fill_value = fill_value
+
     def apply(
         self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -125,7 +132,7 @@ class CutoutAugmentation(AugmentationMethod):
         for i in range(B):
             y = random.randint(0, max(0, H - mask_size))
             x = random.randint(0, max(0, W - mask_size))
-            augmented[i, :, y : y + mask_size, x : x + mask_size] = CUTOUT_FILL_VALUE
+            augmented[i, :, y : y + mask_size, x : x + mask_size] = self.fill_value
 
         return augmented, targets
 
@@ -230,10 +237,15 @@ class PerlinMaskAugmentation(AugmentationMethod):
     """Perlin噪声遮挡（原方法）"""
 
     def __init__(
-        self, device: torch.device, height: int, width: int, pool_size: int = 100
+        self,
+        device: torch.device,
+        height: int,
+        width: int,
+        pool_size: int = 100,
+        persistence: float = 0.5,
     ):
         super().__init__(device)
-        self.mask_generator = CloudMaskGenerator(height, width, device)
+        self.mask_generator = CloudMaskGenerator(height, width, device, persistence)
         self.masks = []
         self.pool_size = pool_size
 
@@ -269,12 +281,18 @@ class NoAugmentation(AugmentationMethod):
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 AUGMENTATION_REGISTRY = {
-    "cutout": lambda device, cfg: CutoutAugmentation(device),
+    "cutout": lambda device, cfg: CutoutAugmentation(
+        device, fill_value=cfg.cutout_fill_value
+    ),
     "mixup": lambda device, cfg: MixupAugmentation(device),
     "cutmix": lambda device, cfg: CutMixAugmentation(device),
     "dropout": lambda device, cfg: DropoutAugmentation(device),
     "perlin": lambda device, cfg: PerlinMaskAugmentation(
-        device, cfg.image_size, cfg.image_size, cfg.mask_pool_size
+        device,
+        cfg.image_size,
+        cfg.image_size,
+        cfg.mask_pool_size,
+        persistence=cfg.perlin_persistence,
     ),
     "none": lambda device, cfg: NoAugmentation(device),
 }

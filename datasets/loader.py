@@ -10,8 +10,8 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from ..utils import get_logger
-from .corruption import CorruptionDataset
 from .preloaded import DATASET_REGISTRY
+from .robustness import CorruptionDataset, DomainShiftDataset, OODDataset
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据集加载函数                                                               ║
@@ -26,7 +26,8 @@ def load_dataset(cfg):
         cfg: 配置对象
 
     返回:
-        train_loader, val_loader, test_loader, corruption_dataset
+        tuple: (train_loader, val_loader, test_loader,
+                corruption_dataset, ood_dataset, domain_dataset)
     """
     dataset_name = cfg.dataset_name.lower()
 
@@ -86,12 +87,46 @@ def load_dataset(cfg):
         f"   训练集: {len(train_subset)} | 验证集: {len(val_subset)} | 测试集: {len(test_dataset)}"
     )
 
-    # 加载Corruption数据集 (任何在 DATASET_REGISTRY 中的数据集都支持)
+    # 加载 Corruption 数据集 (基于配置)
     corruption_dataset = None
-    try:
-        corruption_dataset = CorruptionDataset.from_name(dataset_name, cfg.data_root)
-        get_logger().info(f"   Corruption数据集: {corruption_dataset.name}")
-    except FileNotFoundError as e:
-        get_logger().warning(f"   ⚠️ Corruption数据集未找到: {e}")
+    if cfg.corruption_dataset:
+        try:
+            corruption_dataset = CorruptionDataset.from_name(
+                dataset_name, cfg.data_root
+            )
+            get_logger().info(f"   Corruption数据集: {corruption_dataset.name}")
+        except FileNotFoundError as e:
+            get_logger().warning(f"   ⚠️ Corruption数据集未找到: {e}")
 
-    return train_loader, val_loader, test_loader, corruption_dataset
+    # 加载 OOD 数据集 (基于配置)
+    ood_dataset = None
+    if cfg.ood_dataset:
+        try:
+            # 始终加载与 ID 数据集配套生成的 OOD 数据
+            ood_dataset = OODDataset.from_generated(
+                id_dataset=dataset_name, root=cfg.data_root
+            )
+            get_logger().info(f"   OOD数据集: {ood_dataset.name}")
+        except FileNotFoundError as e:
+            get_logger().warning(f"   ⚠️ OOD数据集未找到 (需预生成): {e}")
+
+    # 加载 Domain Shift 数据集 (基于配置)
+    domain_dataset = None
+    if cfg.domain_dataset:
+        try:
+            # 始终加载与 ID 数据集配套生成的 Domain 数据
+            domain_dataset = DomainShiftDataset.from_generated(
+                id_dataset=dataset_name, root=cfg.data_root
+            )
+            get_logger().info(f"   Domain Shift数据集: {domain_dataset.name}")
+        except FileNotFoundError as e:
+            get_logger().warning(f"   ⚠️ Domain Shift数据集未找到 (需预生成): {e}")
+
+    return (
+        train_loader,
+        val_loader,
+        test_loader,
+        corruption_dataset,
+        ood_dataset,
+        domain_dataset,
+    )

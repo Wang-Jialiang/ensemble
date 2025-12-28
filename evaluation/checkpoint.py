@@ -26,19 +26,13 @@ if TYPE_CHECKING:
 class CheckpointLoader:
     """从 checkpoint 加载模型进行评估
 
-    支持多种训练器的 checkpoint 格式：
-    - StagedEnsembleTrainer: {name}_gpu{id}_model{i}.pth
-    - BatchEnsembleTrainer: model.pth (单文件，但输出多个隐式成员)
-    - SnapshotEnsembleTrainer: snapshot_{cycle}.pth
-    - DistillationTrainer: student_model.pth
+    支持 StagedEnsembleTrainer 的 checkpoint 格式：
+    - {name}_gpu{id}_model{i}.pth
     """
 
-    # 支持的模型文件模式 (按优先级排序)
+    # 支持的模型文件模式
     MODEL_PATTERNS = [
         "*_gpu*_model*.pth",  # StagedEnsembleTrainer
-        "snapshot_*.pth",  # SnapshotEnsembleTrainer
-        "student_model.pth",  # DistillationTrainer
-        "model.pth",  # BatchEnsembleTrainer
     ]
 
     @classmethod
@@ -46,7 +40,7 @@ class CheckpointLoader:
         cls, checkpoint_dir: Path, experiment_name: str
     ) -> List[Path]:
         """
-        查找 checkpoint 目录中的模型文件，支持多种命名模式
+        查找 checkpoint 目录中的模型文件
 
         Returns:
             model_files: 排序后的模型文件路径列表
@@ -89,12 +83,6 @@ class CheckpointLoader:
         """
         加载 checkpoint 并返回可评估的模型上下文
 
-        支持所有训练器格式：
-        - StagedEnsembleTrainer: 多个 {name}_gpu*_model*.pth 文件
-        - BatchEnsembleTrainer: 单个 model.pth (BatchEnsemble 模型)
-        - SnapshotEnsembleTrainer: 多个 snapshot_*.pth 文件
-        - DistillationTrainer: 单个 student_model.pth 文件
-
         Args:
             checkpoint_path: checkpoint 目录路径
             cfg: 配置对象
@@ -118,7 +106,6 @@ class CheckpointLoader:
         state_path = checkpoint_dir / "trainer_state.pth"
         training_time = 0.0
         train_config = {}
-        trainer_type = "unknown"
 
         if state_path.exists():
             state = torch.load(state_path, weights_only=False)
@@ -127,15 +114,6 @@ class CheckpointLoader:
                 "augmentation_method": state.get("augmentation_method", "unknown"),
                 "use_curriculum": state.get("use_curriculum", False),
             }
-            # 检测训练器类型
-            if "num_members" in state:
-                trainer_type = "batch_ensemble"
-            elif "num_cycles" in state or "snapshots" in state:
-                trainer_type = "snapshot"
-            elif "temperature" in state or "alpha" in state:
-                trainer_type = "distillation"
-            else:
-                trainer_type = "staged"
 
         # 查找模型文件
         model_files = CheckpointLoader._find_model_files(
@@ -151,14 +129,11 @@ class CheckpointLoader:
             model = CheckpointLoader._load_model_from_file(model_file, cfg)
             models.append(model)
 
-        get_logger().info(
-            f"✅ 加载 {experiment_name}: {len(models)} 个模型 (type: {trainer_type})"
-        )
+        get_logger().info(f"✅ 加载 {experiment_name}: {len(models)} 个模型")
 
         return {
             "name": experiment_name,
             "models": models,
             "training_time": training_time,
             "config": train_config,
-            "trainer_type": trainer_type,
         }

@@ -19,10 +19,34 @@ from ..utils import get_logger
 from .base import BasePreloadedDataset
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ 数据集注册表                                                                 ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+DATASET_REGISTRY: Dict[str, Type[BasePreloadedDataset]] = {}
+
+
+def register_dataset(name: str):
+    """装饰器：注册数据集到全局注册表
+
+    使用方式:
+        @register_dataset("my_dataset")
+        class MyDataset(BasePreloadedDataset):
+            ...
+    """
+
+    def decorator(cls: Type[BasePreloadedDataset]) -> Type[BasePreloadedDataset]:
+        DATASET_REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 具体数据集实现                                                               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
+@register_dataset("cifar10")
 class PreloadedCIFAR10(BasePreloadedDataset):
     """内存预加载的CIFAR-10数据集"""
 
@@ -63,6 +87,7 @@ class PreloadedCIFAR10(BasePreloadedDataset):
         self._log_loaded(time.time() - start)
 
 
+@register_dataset("eurosat")
 class PreloadedEuroSAT(BasePreloadedDataset):
     """内存预加载的EuroSAT遥感数据集"""
 
@@ -148,18 +173,3 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         self.targets = torch.tensor(all_targets[selected_indices], dtype=torch.long)
 
         self._log_loaded(time.time() - start)
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ 数据集注册表                                                                 ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-DATASET_REGISTRY: Dict[str, Type[BasePreloadedDataset]] = {
-    "cifar10": PreloadedCIFAR10,
-    "eurosat": PreloadedEuroSAT,
-}
-
-
-def register_dataset(name: str, dataset_class: type):
-    """动态注册新数据集"""
-    DATASET_REGISTRY[name] = dataset_class

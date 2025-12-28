@@ -11,24 +11,17 @@ from typing import Optional
 import torch.nn as nn
 import torch.optim as optim
 
-# ╭──────────────────────────────────────────────────────────────────────────────╮
-# │ 常量定义                                                                     │
-# ╰──────────────────────────────────────────────────────────────────────────────╯
-
-# 学习率调度器默认参数
-STEP_LR_MILESTONES = (0.3, 0.6)  # 在这些位置降低学习率
-STEP_LR_GAMMA = 0.1  # 学习率衰减因子
-PLATEAU_FACTOR = 0.5
-PLATEAU_PATIENCE = 5
-
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 优化器与调度器工厂函数                                                       ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
 def create_optimizer(
-    model: nn.Module, optimizer_name: str, lr: float, weight_decay: float
+    model: nn.Module,
+    optimizer_name: str,
+    lr: float,
+    weight_decay: float,
+    sgd_momentum: float = 0.9,
 ) -> optim.Optimizer:
     """
     创建优化器
@@ -38,6 +31,7 @@ def create_optimizer(
         optimizer_name: 优化器名称 (adamw, sgd, adam, rmsprop)
         lr: 学习率
         weight_decay: 权重衰减
+        sgd_momentum: SGD 动量 (默认 0.9)
 
     Returns:
         optimizer: 优化器实例
@@ -50,7 +44,9 @@ def create_optimizer(
     elif optimizer_name == "adam":
         return optim.Adam(params, lr=lr, weight_decay=weight_decay)
     elif optimizer_name == "sgd":
-        return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=0.9)
+        return optim.SGD(
+            params, lr=lr, weight_decay=weight_decay, momentum=sgd_momentum
+        )
     elif optimizer_name == "rmsprop":
         return optim.RMSprop(params, lr=lr, weight_decay=weight_decay)
     else:
@@ -63,18 +59,14 @@ def create_scheduler(
     optimizer: optim.Optimizer,
     scheduler_name: str,
     total_epochs: int,
-    steps_per_epoch: int = 0,
-    max_lr_factor: float = 10.0,
 ) -> Optional[optim.lr_scheduler.LRScheduler]:
     """
     创建学习率调度器
 
     Args:
         optimizer: 优化器
-        scheduler_name: 调度器名称 (cosine, step, plateau, onecycle, none)
+        scheduler_name: 调度器名称 (cosine, none)
         total_epochs: 总训练轮数
-        steps_per_epoch: 每轮步数 (用于 OneCycleLR)
-        max_lr_factor: OneCycleLR 最大学习率倍数 (默认10)
 
     Returns:
         scheduler: 调度器实例，none 时返回 None
@@ -83,29 +75,10 @@ def create_scheduler(
 
     if scheduler_name == "cosine":
         return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
-    elif scheduler_name == "step":
-        milestones = [int(total_epochs * m) for m in STEP_LR_MILESTONES]
-        return optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=milestones, gamma=STEP_LR_GAMMA
-        )
-    elif scheduler_name == "plateau":
-        return optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=PLATEAU_FACTOR, patience=PLATEAU_PATIENCE
-        )
-    elif scheduler_name == "onecycle":
-        if steps_per_epoch <= 0:
-            raise ValueError("OneCycleLR 需要 steps_per_epoch > 0")
-        return optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=optimizer.param_groups[0]["lr"] * max_lr_factor,
-            total_steps=total_epochs * steps_per_epoch,
-        )
     elif scheduler_name == "none":
         return None
     else:
-        raise ValueError(
-            f"不支持的调度器: {scheduler_name}. 支持: cosine, step, plateau, onecycle, none"
-        )
+        raise ValueError(f"不支持的调度器: {scheduler_name}. 支持: cosine, none")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
