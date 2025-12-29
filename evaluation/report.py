@@ -79,11 +79,11 @@ class ReportGenerator:
     ) -> Dict[str, Any]:
         """通用模型评估方法 - 核心评估逻辑"""
         get_logger().info(f"\n📊 Evaluating: {exp_name}")
-
-        # 获取集成策略
         ensemble_fn = get_ensemble_fn(cfg)
 
-        # 标准评估
+        # ════════════════════════════════════════════════════════════════
+        # 标准评估 (Standard Metrics)
+        # ════════════════════════════════════════════════════════════════
         get_logger().info("   🔍 Standard evaluation...")
         all_logits, all_targets = get_all_models_logits(models, test_loader, device)
         metrics_calc = MetricsCalculator(cfg.num_classes, cfg.ece_n_bins)
@@ -94,7 +94,9 @@ class ReportGenerator:
         get_logger().info(f"   Ensemble Acc:   {standard_metrics['ensemble_acc']:.2f}%")
         get_logger().info(f"   ECE:            {standard_metrics['ece']:.4f}")
 
-        # Corruption 评估
+        # ════════════════════════════════════════════════════════════════
+        # 鲁棒性评估 (Robustness Evaluation)
+        # ════════════════════════════════════════════════════════════════
         corruption_results = None
         if corruption_dataset is not None:
             get_logger().info("   🔍 Corruption evaluation...")
@@ -136,7 +138,9 @@ class ReportGenerator:
                 dataset_name=cfg.dataset_name,
             )
 
-        # Grad-CAM 分析
+        # ════════════════════════════════════════════════════════════════
+        # 可解释性分析 (Grad-CAM)
+        # ════════════════════════════════════════════════════════════════
         gradcam_metrics = None
         if run_gradcam:
             get_logger().info("   🔍 Grad-CAM analysis...")

@@ -18,7 +18,7 @@ from ..config import Config
 from ..models import ModelFactory
 from ..utils import ensure_dir, get_logger
 from .augmentation import AUGMENTATION_REGISTRY, AugmentationMethod
-from .scheduler import create_optimizer, create_scheduler
+from .optimization import create_optimizer, create_scheduler
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ GPU Worker                                                                   ║
@@ -81,6 +81,13 @@ class GPUWorker:
         self.augmentation_method = augmentation_method
         self.augmentation = self._create_augmentation(augmentation_method)
 
+        # 模型级增强: 初始化每个模型的固定 seed
+        self.use_model_level_aug = cfg.model_level_augmentation
+        if self.use_model_level_aug:
+            # 每个模型分配唯一 seed，用于动态生成 mask
+            # ratio 参数在训练时传入，可随阶段变化
+            self.augmentation.init_model_seeds(num_models=num_models)
+
         # AMP
         self.scaler = GradScaler("cuda") if cfg.use_amp else None
 
@@ -97,7 +104,13 @@ class GPUWorker:
         return AUGMENTATION_REGISTRY[method](self.device, self.cfg)
 
     def precompute_masks(self, num_masks: int, target_ratio: float):
-        """预计算mask（如果需要）"""
+        """预计算mask（仅样本级增强使用）
+
+        样本级增强：每个 epoch 用当前 ratio 预计算共享 mask 池
+        模型级增强：跳过，因为使用固定 seed 在 apply 时动态生成
+        """
+        if self.use_model_level_aug:
+            return
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)
 
@@ -117,14 +130,21 @@ class GPUWorker:
 
             total_loss = 0.0
 
-            for model, optimizer in zip(self.models, self.optimizers):
+            for model_idx, (model, optimizer) in enumerate(
+                zip(self.models, self.optimizers)
+            ):
                 model.train()
                 optimizer.zero_grad(set_to_none=True)
 
                 # 应用增强
                 if use_mask:
+                    # 模型级增强: 传递 model_index，否则为 None (样本级)
                     aug_inputs, aug_targets = self.augmentation.apply(
-                        inputs, targets, mask_ratio, mask_prob
+                        inputs,
+                        targets,
+                        mask_ratio,
+                        mask_prob,
+                        model_index=model_idx if self.use_model_level_aug else None,
                     )
                 else:
                     aug_inputs, aug_targets = inputs, targets
@@ -155,30 +175,11 @@ class GPUWorker:
         self.stream.synchronize()
         return self._pending_loss if self._pending_loss else 0.0
 
-    def step_schedulers(self, val_loss: Optional[float] = None):
-        """更新学习率调度器
-
-        Args:
-            val_loss: 验证损失 (用于 ReduceLROnPlateau)
-        """
+    def step_schedulers(self):
+        """更新学习率调度器"""
         for scheduler in self.schedulers:
-            if scheduler is None:
-                continue
-            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                if val_loss is not None:
-                    scheduler.step(val_loss)
-            else:
+            if scheduler is not None:
                 scheduler.step()
-
-    def set_lr(self, lr: float):
-        """设置所有模型的学习率
-
-        Args:
-            lr: 新的学习率
-        """
-        for optimizer in self.optimizers:
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
 
     def get_lr(self) -> float:
         """获取当前学习率"""
@@ -249,13 +250,8 @@ class HistorySaver:
         ensure_dir(self.save_dir)
 
     def save(self, history: Dict[str, List], filename: str = "history"):
-        """保存训练历史为JSON和CSV"""
+        """保存训练历史为CSV"""
         import csv
-        import json
-
-        json_path = self.save_dir / f"{filename}.json"
-        with open(json_path, "w") as f:
-            json.dump(history, f, indent=2)
 
         csv_path = self.save_dir / f"{filename}.csv"
         with open(csv_path, "w", newline="") as f:
@@ -265,4 +261,4 @@ class HistorySaver:
                 for i in range(len(history[list(history.keys())[0]])):
                     row = {k: v[i] for k, v in history.items()}
                     writer.writerow(row)
-        get_logger().info(f"💾 History saved to: {json_path}")
+        get_logger().info(f"💾 History saved to: {csv_path}")

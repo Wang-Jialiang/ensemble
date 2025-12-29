@@ -7,23 +7,11 @@
 """
 
 import random
-from typing import Callable, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-# ╭──────────────────────────────────────────────────────────────────────────────╮
-# │ 常量定义                                                                     │
-# ╰──────────────────────────────────────────────────────────────────────────────╯
-
-# Perlin 噪声生成参数
-PERLIN_OCTAVES_LARGE = 4  # 图像尺寸 >= 64 时的 octaves
-PERLIN_OCTAVES_SMALL = 3  # 图像尺寸 < 64 时的 octaves
-
-# Cutout 增强的填充值
-CUTOUT_FILL_VALUE = 0.5
-
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 云状Mask生成器                                                               ║
@@ -34,14 +22,23 @@ class CloudMaskGenerator:
     """GPU加速的云状Mask生成器"""
 
     def __init__(
-        self, height: int, width: int, device: torch.device, persistence: float = 0.5
+        self,
+        height: int,
+        width: int,
+        device: torch.device,
+        persistence: float,
+        octaves_large: int,
+        octaves_small: int,
+        scale_ratio: float = 0.3,
     ):
         self.h = height
         self.w = width
         self.device = device
         self.persistence = persistence
-        # base_scale 随图像尺寸动态调整: 32x32 -> 16, 64x64 -> 32
-        self.base_scale = min(height, width) / 2.0
+        self.octaves_large = octaves_large
+        self.octaves_small = octaves_small
+        # base_scale 随图像尺寸动态调整，使用 scale_ratio 控制碎裂程度
+        self.base_scale = min(height, width) * scale_ratio
 
     def generate_batch(
         self, num_masks: int, target_ratio: float = 0.3
@@ -51,7 +48,7 @@ class CloudMaskGenerator:
         for _ in range(num_masks):
             # 动态调整 octaves 参数
             scale = self.base_scale * random.uniform(0.8, 1.2)
-            octaves = PERLIN_OCTAVES_LARGE if self.h >= 64 else PERLIN_OCTAVES_SMALL
+            octaves = self.octaves_large if self.h >= 64 else self.octaves_small
             persistence = self.persistence
 
             noise = self._generate_perlin_noise(scale, octaves, persistence)
@@ -95,146 +92,324 @@ class CloudMaskGenerator:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ 增强方法注册表                                                               ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+AUGMENTATION_REGISTRY: dict = {}
+
+
+def register_augmentation(name: str):
+    """类装饰器：注册增强方法
+
+    被装饰的类必须实现 from_config(cls, device, cfg) 类方法。
+
+    用法:
+        @register_augmentation("method_name")
+        class MethodAugmentation(AugmentationMethod):
+            @classmethod
+            def from_config(cls, device, cfg):
+                return cls(device, ...)
+    """
+
+    def decorator(cls):
+        if not hasattr(cls, "from_config"):
+            raise AttributeError(
+                f"{cls.__name__} must implement from_config classmethod"
+            )
+        AUGMENTATION_REGISTRY[name] = cls.from_config
+        return cls
+
+    return decorator
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据增强方法                                                                 ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
 class AugmentationMethod:
-    """数据增强方法基类"""
+    """数据增强方法基类
+
+    支持两种模式:
+    - 样本级 (model_index=None): 每个样本随机不同的 mask
+    - 模型级 (model_index=int): 每个模型固定 seed，动态生成 mask (ratio 可变)
+    """
 
     def __init__(self, device: torch.device):
         self.device = device
+        self.model_pools_initialized = False
+
+    def init_model_seeds(self, num_models: int, base_seed: int = None):
+        """初始化模型级固定 seed（子类实现）
+
+        每个模型分配唯一 seed，用于动态生成 mask。
+        同一 seed 生成的噪声底图一致，ratio 参数控制遮挡面积。
+
+        Args:
+            num_models: 模型数量
+            base_seed: 基础 seed，None 则随机生成
+        """
+        pass
 
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用增强方法"""
+        """应用增强方法
+
+        Args:
+            images: 输入图像 [B, C, H, W]
+            targets: 标签
+            ratio: 遮挡比例
+            prob: 应用概率
+            model_index: 模型索引，None 表示样本级随机，int 表示使用模型级固定池
+        """
         raise NotImplementedError
 
 
+@register_augmentation("cutout")
 class CutoutAugmentation(AugmentationMethod):
-    """Cutout硬遮挡"""
+    """Cutout硬遮挡
 
-    def __init__(self, device: torch.device, fill_value: float = CUTOUT_FILL_VALUE):
+    支持两种模式:
+    - 样本级: 每个样本随机位置
+    - 模型级: 每个模型固定 seed，动态生成位置
+    """
+
+    def __init__(self, device: torch.device, fill_value: float = 0.0):
         super().__init__(device)
         self.fill_value = fill_value
+        self.model_seeds = {}  # {model_idx: seed}
+
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(device, fill_value=cfg.cutout_fill_value)
+
+    def init_model_seeds(self, num_models: int, base_seed: int = None):
+        """初始化模型级固定 seed"""
+        base = base_seed if base_seed is not None else random.randint(0, 1000000)
+        for model_idx in range(num_models):
+            self.model_seeds[model_idx] = base + model_idx * 10000
+        self.model_pools_initialized = True
 
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if random.random() > prob:
             return images, targets
 
         B, C, H, W = images.shape
         mask_size = int(H * np.sqrt(ratio))
-
         augmented = images.clone()
-        for i in range(B):
-            y = random.randint(0, max(0, H - mask_size))
-            x = random.randint(0, max(0, W - mask_size))
-            augmented[i, :, y : y + mask_size, x : x + mask_size] = self.fill_value
+
+        if model_index is not None and self.model_pools_initialized:
+            # 模型级: 使用固定 seed 生成位置
+            seed = self.model_seeds[model_index]
+            rng = random.Random(seed)
+            y = rng.randint(0, max(0, H - mask_size))
+            x = rng.randint(0, max(0, W - mask_size))
+            # 所有样本使用相同位置
+            for i in range(B):
+                augmented[i, :, y : y + mask_size, x : x + mask_size] = self.fill_value
+        else:
+            # 样本级: 每个样本随机位置
+            for i in range(B):
+                y = random.randint(0, max(0, H - mask_size))
+                x = random.randint(0, max(0, W - mask_size))
+                augmented[i, :, y : y + mask_size, x : x + mask_size] = self.fill_value
 
         return augmented, targets
 
 
-class MixupAugmentation(AugmentationMethod):
-    """Mixup 混合增强
+@register_augmentation("pixel_has")
+class PixelHaSAugmentation(AugmentationMethod):
+    """像素级 Hide-and-Seek (1×1 HaS)
 
-    将两张图像按比例混合，同时返回混合后的软标签。
-    软标签是两个 one-hot 标签的加权平均，可直接用于 CrossEntropyLoss。
+    每个像素独立以概率 ratio 被隐藏 (置零)。
+    等价于 block_size=1 的 Hide-and-Seek。
 
-    参考: mixup: Beyond Empirical Risk Minimization (Zhang et al., 2017)
+    支持两种模式:
+    - 样本级: 每个样本随机 mask
+    - 模型级: 每个模型固定 seed
     """
 
+    def __init__(self, device: torch.device):
+        super().__init__(device)
+        self.model_seeds = {}  # {model_idx: seed}
+
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(device)
+
+    def init_model_seeds(self, num_models: int, base_seed: int = None):
+        """初始化模型级固定 seed"""
+        base = base_seed if base_seed is not None else random.randint(0, 1000000)
+        for model_idx in range(num_models):
+            self.model_seeds[model_idx] = base + model_idx * 10000
+        self.model_pools_initialized = True
+
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if random.random() > prob:
             return images, targets
 
-        # 边界检查防止 beta 分布参数无效
-        ratio = np.clip(ratio, 0.01, 0.99)
-        lam = np.random.beta(ratio * 10, (1 - ratio) * 10)
-        lam = max(lam, 1 - lam)
+        if model_index is not None and self.model_pools_initialized:
+            # 模型级: 使用固定 seed 生成 mask
+            seed = self.model_seeds[model_index]
+            generator = torch.Generator(device=self.device).manual_seed(seed)
+            mask = (
+                torch.rand(images.shape, device=self.device, generator=generator)
+                > ratio
+            )
+        else:
+            # 样本级: 随机 mask
+            mask = torch.rand_like(images) > ratio
 
-        batch_size = images.size(0)
-        index = torch.randperm(batch_size).to(self.device)
-
-        # 混合图像
-        mixed_images = lam * images + (1 - lam) * images[index]
-
-        # 创建混合软标签
-        # 保持返回硬标签以维护接口兼容性
-        # 训练循环如需处理 Mixup，可使用 _last_lam 和 _last_index 计算混合损失
-        self._last_lam = lam
-        self._last_index = index
-
-        return mixed_images, targets
+        augmented = images * mask.float()
+        return augmented, targets
 
 
-class CutMixAugmentation(AugmentationMethod):
-    """CutMix 剪切混合增强
+@register_augmentation("gridmask")
+class GridMaskAugmentation(AugmentationMethod):
+    """GridMask 网格遮挡
 
-    将一张图像的一块区域替换为另一张图像的对应区域。
-    标签混合比例基于实际剪切区域的面积比例计算。
+    使用规则的网格模式遮挡图像，遮挡区域呈均匀分布的正方形网格。
+    作为"人造规则形状"的代表，与 Perlin 的自然形状形成对比。
+    网格大小会根据图像尺寸自适应缩放。
 
-    参考: CutMix: Regularization Strategy to Train Strong Classifiers
-          with Localizable Features (Yun et al., 2019)
+    支持两种模式:
+    - 样本级: 每个样本随机参数
+    - 模型级: 每个模型固定 seed，动态生成参数
+
+    参考: GridMask Data Augmentation (Chen et al., 2020)
     """
 
+    def __init__(
+        self,
+        device: torch.device,
+        d_ratio_min: float = 0.1,
+        d_ratio_max: float = 0.3,
+    ):
+        """
+        Args:
+            device: 计算设备
+            d_ratio_min: 网格单元最小尺寸占图像尺寸的比例 (默认 0.1 = 10%)
+            d_ratio_max: 网格单元最大尺寸占图像尺寸的比例 (默认 0.3 = 30%)
+        """
+        super().__init__(device)
+        self.d_ratio_min = d_ratio_min
+        self.d_ratio_max = d_ratio_max
+        self.model_seeds = {}  # {model_idx: seed}
+
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(
+            device,
+            d_ratio_min=cfg.gridmask_d_ratio_min,
+            d_ratio_max=cfg.gridmask_d_ratio_max,
+        )
+
+    def init_model_seeds(self, num_models: int, base_seed: int = None):
+        """初始化模型级固定 seed"""
+        base = base_seed if base_seed is not None else random.randint(0, 1000000)
+        for model_idx in range(num_models):
+            self.model_seeds[model_idx] = base + model_idx * 10000
+        self.model_pools_initialized = True
+
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if random.random() > prob:
             return images, targets
 
         B, C, H, W = images.shape
+        min_size = min(H, W)
+        augmented = images.clone()
 
-        lam = np.random.beta(1.0, 1.0)
-        cut_rat = np.sqrt(1.0 - lam)
-        cut_w = int(W * cut_rat)
-        cut_h = int(H * cut_rat)
+        if model_index is not None and self.model_pools_initialized:
+            # 模型级: 使用固定 seed 生成参数
+            seed = self.model_seeds[model_index]
+            rng = random.Random(seed)
+            d_min = max(4, int(min_size * self.d_ratio_min))
+            d_max = max(8, int(min_size * self.d_ratio_max))
+            d = rng.randint(d_min, d_max)
+            offset_x = rng.randint(0, d - 1)
+            offset_y = rng.randint(0, d - 1)
 
-        cx = random.randint(0, W)
-        cy = random.randint(0, H)
+            block_len = int(d * np.sqrt(ratio))  # ratio 表示面积比例
 
-        bbx1 = int(np.clip(cx - cut_w // 2, 0, W))
-        bby1 = int(np.clip(cy - cut_h // 2, 0, H))
-        bbx2 = int(np.clip(cx + cut_w // 2, 0, W))
-        bby2 = int(np.clip(cy + cut_h // 2, 0, H))
+            # 生成网格 mask
+            mask = torch.ones(H, W, device=self.device)
+            for i in range(-1, H // d + 1):
+                for j in range(-1, W // d + 1):
+                    y1 = i * d + offset_y
+                    y2 = y1 + block_len
+                    x1 = j * d + offset_x
+                    x2 = x1 + block_len
+                    y1, y2 = max(0, y1), min(H, y2)
+                    x1, x2 = max(0, x1), min(W, x2)
+                    if y2 > y1 and x2 > x1:
+                        mask[y1:y2, x1:x2] = 0
 
-        index = torch.randperm(B).to(self.device)
-        mixed_images = images.clone()
-        mixed_images[:, :, bby1:bby2, bbx1:bbx2] = images[
-            index, :, bby1:bby2, bbx1:bbx2
-        ]
+            # 所有样本使用相同的 mask
+            for b in range(B):
+                augmented[b] = images[b] * mask.unsqueeze(0)
+        else:
+            # 样本级: 每个样本随机参数
+            for b in range(B):
+                d_min = max(4, int(min_size * self.d_ratio_min))
+                d_max = max(8, int(min_size * self.d_ratio_max))
+                d = random.randint(d_min, d_max)
+                offset_x = random.randint(0, d - 1)
+                offset_y = random.randint(0, d - 1)
 
-        # 计算实际的 lambda (基于剪切区域面积)
-        actual_lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (W * H))
+                block_len = int(d * np.sqrt(ratio))
 
-        # 存储混合信息供外部使用 (用于计算正确的损失)
-        self._last_lam = actual_lam
-        self._last_index = index
+                mask = torch.ones(H, W, device=self.device)
+                for i in range(-1, H // d + 1):
+                    for j in range(-1, W // d + 1):
+                        y1 = i * d + offset_y
+                        y2 = y1 + block_len
+                        x1 = j * d + offset_x
+                        x2 = x1 + block_len
+                        y1, y2 = max(0, y1), min(H, y2)
+                        x1, x2 = max(0, x1), min(W, x2)
+                        if y2 > y1 and x2 > x1:
+                            mask[y1:y2, x1:x2] = 0
 
-        return mixed_images, targets
+                augmented[b] = images[b] * mask.unsqueeze(0)
 
-
-class DropoutAugmentation(AugmentationMethod):
-    """特征级Dropout"""
-
-    def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if random.random() > prob:
-            return images, targets
-
-        mask = torch.rand_like(images) > ratio
-        augmented = images * mask.float()
         return augmented, targets
 
 
+@register_augmentation("perlin")
 class PerlinMaskAugmentation(AugmentationMethod):
-    """Perlin噪声遮挡（原方法）"""
+    """Perlin噪声遮挡
+
+    支持两种模式:
+    - 样本级: 每个样本从共享池随机选择 mask
+    - 模型级: 每个模型拥有固定 seed，动态生成 mask（ratio 可变）
+    """
 
     def __init__(
         self,
@@ -243,61 +418,143 @@ class PerlinMaskAugmentation(AugmentationMethod):
         width: int,
         pool_size: int = 100,
         persistence: float = 0.5,
+        octaves_large: int = 4,
+        octaves_small: int = 3,
+        scale_ratio: float = 0.3,
     ):
         super().__init__(device)
-        self.mask_generator = CloudMaskGenerator(height, width, device, persistence)
-        self.masks = []
+        self.height = height
+        self.width = width
+        self.mask_generator = CloudMaskGenerator(
+            height,
+            width,
+            device,
+            persistence,
+            octaves_large,
+            octaves_small,
+            scale_ratio,
+        )
+        self.masks = []  # 样本级共享池
         self.pool_size = pool_size
+        self.model_seeds = {}  # {model_idx: seed} 模型级固定 seed
+
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(
+            device,
+            cfg.image_size,
+            cfg.image_size,
+            cfg.mask_pool_size,
+            persistence=cfg.perlin_persistence,
+            octaves_large=cfg.perlin_octaves_large,
+            octaves_small=cfg.perlin_octaves_small,
+            scale_ratio=cfg.perlin_scale_ratio,
+        )
 
     def precompute_masks(self, target_ratio: float):
-        """预计算mask池"""
+        """预计算样本级共享 mask 池"""
         self.masks = self.mask_generator.generate_batch(self.pool_size, target_ratio)
 
+    def init_model_seeds(self, num_models: int, base_seed: int = None):
+        """初始化模型级固定 seed
+
+        每个模型分配唯一 seed，用于动态生成 mask。
+        同一 seed 生成的 Perlin 噪声底图一致，ratio 控制遮挡面积。
+
+        Args:
+            num_models: 模型数量
+            base_seed: 基础 seed，None 则随机生成
+        """
+        base = base_seed if base_seed is not None else random.randint(0, 1000000)
+        for model_idx in range(num_models):
+            self.model_seeds[model_idx] = base + model_idx * 10000
+        self.model_pools_initialized = True
+
+    def _generate_mask_with_seed(self, seed: int, ratio: float) -> torch.Tensor:
+        """使用固定 seed 生成 Perlin mask
+
+        Args:
+            seed: 随机种子，决定噪声底图
+            ratio: 遮挡比例，决定遮挡面积
+
+        Returns:
+            mask: [1, 1, H, W] 的 mask tensor
+        """
+        # 保存当前随机状态
+        torch_state = torch.get_rng_state()
+        np_state = np.random.get_state()
+        py_state = random.getstate()
+
+        # 设置固定 seed
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+
+        # 生成 mask
+        masks = self.mask_generator.generate_batch(1, ratio)
+        mask = masks[0]
+
+        # 恢复随机状态
+        torch.set_rng_state(torch_state)
+        np.random.set_state(np_state)
+        random.setstate(py_state)
+
+        return mask
+
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if random.random() > prob or not self.masks:
+        if random.random() > prob:
             return images, targets
 
-        mask = self.masks[random.randint(0, len(self.masks) - 1)]
-        if mask.shape[1] == 1:
-            mask = mask.expand(1, 3, -1, -1)
+        B = images.shape[0]
+        C = images.shape[1]
+        augmented = images.clone()
 
-        augmented = images * mask
+        if model_index is not None and self.model_pools_initialized:
+            # 模型级: 使用固定 seed 动态生成 mask (ratio 生效)
+            seed = self.model_seeds[model_index]
+            mask = self._generate_mask_with_seed(seed, ratio)
+            if mask.shape[1] == 1:
+                mask = mask.expand(1, C, -1, -1)
+            # 所有样本使用相同的 mask
+            mask_expanded = mask.squeeze(0)  # [C, H, W]
+            for b in range(B):
+                augmented[b] = images[b] * mask_expanded
+        else:
+            # 样本级: 从共享池随机选择
+            if not self.masks:
+                raise RuntimeError(
+                    "PerlinMaskAugmentation: must call precompute_masks() before apply()"
+                )
+            for b in range(B):
+                mask = random.choice(self.masks)
+                if mask.shape[1] == 1:
+                    mask = mask.expand(1, C, -1, -1)
+                augmented[b] = images[b] * mask.squeeze(0)
+
         return augmented, targets
 
 
+@register_augmentation("none")
 class NoAugmentation(AugmentationMethod):
     """无增强（Baseline）"""
 
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(device)
+
     def apply(
-        self, images: torch.Tensor, targets: torch.Tensor, ratio: float, prob: float
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+        model_index: int = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return images, targets
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ 增强方法注册表                                                               ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-AUGMENTATION_REGISTRY = {
-    "cutout": lambda device, cfg: CutoutAugmentation(
-        device, fill_value=cfg.cutout_fill_value
-    ),
-    "mixup": lambda device, cfg: MixupAugmentation(device),
-    "cutmix": lambda device, cfg: CutMixAugmentation(device),
-    "dropout": lambda device, cfg: DropoutAugmentation(device),
-    "perlin": lambda device, cfg: PerlinMaskAugmentation(
-        device,
-        cfg.image_size,
-        cfg.image_size,
-        cfg.mask_pool_size,
-        persistence=cfg.perlin_persistence,
-    ),
-    "none": lambda device, cfg: NoAugmentation(device),
-}
-
-
-def register_augmentation(name: str, builder: Callable):
-    """动态注册增强方法"""
-    AUGMENTATION_REGISTRY[name] = builder

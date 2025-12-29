@@ -4,7 +4,6 @@
 ================================================================================
 
 模块化训练包，包含：
-- base: BaseTrainer (训练器抽象基类)
 - core: StagedEnsembleTrainer (三阶段集成训练器)、train_experiment
 - worker: GPUWorker、HistorySaver
 - augmentation: 数据增强方法、CloudMaskGenerator
@@ -12,7 +11,6 @@
 
 使用方式:
     from ensemble.training import train_experiment, StagedEnsembleTrainer
-    from ensemble.training import BaseTrainer  # 抽象基类
     from ensemble.training import AUGMENTATION_REGISTRY, register_augmentation
 """
 
@@ -21,17 +19,13 @@ from .augmentation import (
     AUGMENTATION_REGISTRY,
     AugmentationMethod,
     CloudMaskGenerator,
-    CutMixAugmentation,
     CutoutAugmentation,
-    DropoutAugmentation,
-    MixupAugmentation,
+    GridMaskAugmentation,
     NoAugmentation,
     PerlinMaskAugmentation,
+    PixelHaSAugmentation,
     register_augmentation,
 )
-
-# 训练器基类
-from .base import BaseTrainer
 
 # 核心训练器
 from .core import (
@@ -40,7 +34,7 @@ from .core import (
 )
 
 # 调度器与优化器
-from .scheduler import (
+from .optimization import (
     EarlyStopping,
     create_optimizer,
     create_scheduler,
@@ -53,8 +47,6 @@ from .worker import (
 )
 
 __all__ = [
-    # Base
-    "BaseTrainer",
     # Core Trainers
     "StagedEnsembleTrainer",
     "train_experiment",
@@ -66,9 +58,8 @@ __all__ = [
     "AugmentationMethod",
     "CloudMaskGenerator",
     "CutoutAugmentation",
-    "MixupAugmentation",
-    "CutMixAugmentation",
-    "DropoutAugmentation",
+    "GridMaskAugmentation",
+    "PixelHaSAugmentation",
     "PerlinMaskAugmentation",
     "NoAugmentation",
     "register_augmentation",

@@ -58,7 +58,9 @@ class MetricsCalculator:
             ensemble_logits = ensemble_fn(all_logits)
             ensemble_preds = ensemble_logits.argmax(dim=1)
 
-            # 准确率和校准
+            # ════════════════════════════════════════════════════════════════
+            # 准确率与校准指标
+            # ════════════════════════════════════════════════════════════════
             metrics["ensemble_acc"] = (
                 100.0 * (ensemble_preds == targets).float().mean().item()
             )
@@ -79,7 +81,9 @@ class MetricsCalculator:
                 100.0 * correct_per_model.any(dim=0).float().mean().item()
             )
 
-            # 分歧度（churn）
+            # ════════════════════════════════════════════════════════════════
+            # 多样性指标 (分歧度、JS散度、CKA、斯皮尔曼相关)
+            # ════════════════════════════════════════════════════════════════
             num_models = all_preds.shape[0]
             disagreement_sum = sum(
                 (all_preds[i] != all_preds[j]).float().mean().item()
@@ -134,7 +138,9 @@ class MetricsCalculator:
                 spearman_sum / spearman_count if spearman_count > 0 else 1.0
             )
 
-            # Top-5准确率
+            # ════════════════════════════════════════════════════════════════
+            # 置信度指标
+            # ════════════════════════════════════════════════════════════════
             if self.num_classes >= 5:
                 top5 = ensemble_logits.topk(5, dim=1)[1]
                 metrics["top5_acc"] = (
@@ -154,7 +160,9 @@ class MetricsCalculator:
                 max_probs[incorrect_mask].mean().item() if incorrect_mask.any() else 0.0
             )
 
-            # 公平性指标 (内联计算)
+            # ════════════════════════════════════════════════════════════════
+            # 公平性指标 (类别准确率、基尼系数、EOD)
+            # ════════════════════════════════════════════════════════════════
             per_class_acc = []
             per_class_count = []
             for c in range(self.num_classes):

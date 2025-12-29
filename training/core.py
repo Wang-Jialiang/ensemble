@@ -21,15 +21,100 @@ from tqdm import tqdm
 
 from ..config import Config
 from ..utils import ensure_dir, format_duration, get_logger
-from .scheduler import EarlyStopping
+from .optimization import EarlyStopping
 from .worker import GPUWorker, HistorySaver
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ Checkpoint Mixin                                                           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+class CheckpointMixin:
+    """检查点管理 Mixin
+
+    提供 checkpoint 保存、加载、清理功能。
+    需要子类提供: cfg, name, workers, history, best_val_loss, best_epoch,
+                  early_stopping, total_training_time, augmentation_method,
+                  use_curriculum, fixed_ratio, fixed_prob, logger
+    """
+
+    def _save_checkpoint(self, tag: str):
+        """保存checkpoint"""
+        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
+        ensure_dir(checkpoint_dir)
+
+        for worker in self.workers:
+            worker.save_models(str(checkpoint_dir), self.name)
+
+        state = {
+            "epoch": len(self.history["epoch"]),
+            "best_val_loss": self.best_val_loss,
+            "best_epoch": self.best_epoch,
+            "history": self.history,
+            "early_stopping_counter": self.early_stopping.counter,
+            "total_training_time": self.total_training_time,
+            "augmentation_method": self.augmentation_method,
+            "use_curriculum": self.use_curriculum,
+            "fixed_ratio": self.fixed_ratio,
+            "fixed_prob": self.fixed_prob,
+        }
+        torch.save(state, checkpoint_dir / "trainer_state.pth")
+        self.logger.info(f"💾 Saved checkpoint: {tag}")
+
+    def load_checkpoint(self, tag: str = "best") -> bool:
+        """加载checkpoint"""
+        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
+        if not checkpoint_dir.exists():
+            self.logger.warning(f"⚠️ Checkpoint not found: {checkpoint_dir}")
+            return False
+
+        for worker in self.workers:
+            worker.load_models(str(checkpoint_dir), self.name)
+
+        state_path = checkpoint_dir / "trainer_state.pth"
+        if state_path.exists():
+            state = torch.load(state_path, weights_only=False)
+            self.best_val_loss = state["best_val_loss"]
+            self.best_epoch = state["best_epoch"]
+            self.history = state["history"]
+            self.early_stopping.counter = state.get("early_stopping_counter", 0)
+            self.total_training_time = state.get("total_training_time", 0.0)
+            self.augmentation_method = state.get(
+                "augmentation_method", self.augmentation_method
+            )
+            self.use_curriculum = state.get("use_curriculum", self.use_curriculum)
+            self.fixed_ratio = state.get("fixed_ratio", self.fixed_ratio)
+            self.fixed_prob = state.get("fixed_prob", self.fixed_prob)
+            self.logger.info(f"✅ Loaded checkpoint: {tag}")
+            self.logger.info(
+                f"   Augmentation: {self.augmentation_method}, Curriculum: {self.use_curriculum}"
+            )
+            return True
+        return False
+
+    def _cleanup_old_checkpoints(self):
+        """清理旧checkpoint"""
+        checkpoint_base = Path(self.cfg.save_dir) / "checkpoints" / self.name
+        if not checkpoint_base.exists():
+            return
+
+        epoch_dirs = [
+            d for d in checkpoint_base.iterdir() if d.name.startswith("epoch_")
+        ]
+        epoch_dirs.sort(key=lambda x: int(x.name.split("_")[1]))
+
+        if len(epoch_dirs) > self.cfg.keep_last_n_checkpoints:
+            for old_dir in epoch_dirs[: -self.cfg.keep_last_n_checkpoints]:
+                shutil.rmtree(old_dir)
+                self.logger.info(f"🗑️ Removed old checkpoint: {old_dir.name}")
+
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 三阶段集成训练器                                                             ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-class StagedEnsembleTrainer:
+class StagedEnsembleTrainer(CheckpointMixin):
     """
     三阶段集成训练器 (支持多种数据增强方法)
 
@@ -143,25 +228,25 @@ class StagedEnsembleTrainer:
 
         self.logger = logger
 
-    def _get_stage_info(self, epoch: int) -> Tuple[int, str, float, float, bool, float]:
+    def _get_stage_info(self, epoch: int) -> Tuple[int, str, float, float, bool]:
         """获取当前阶段信息
 
         Returns:
-            Tuple: (stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale)
+            Tuple: (stage_num, stage_name, mask_ratio, mask_prob, use_mask)
         """
         cfg = self.cfg
 
         # 模式1: 无增强 (Baseline)
         if self.augmentation_method == "none":
-            return 1, "NoAug", 0.0, 0.0, False, 1.0
+            return 1, "NoAug", 0.0, 0.0, False
 
         # 模式2: 固定参数模式
         if not self.use_curriculum:
-            return 1, "Fixed", self.fixed_ratio, self.fixed_prob, True, 1.0
+            return 1, "Fixed", self.fixed_ratio, self.fixed_prob, True
 
         # 模式3: 课程学习模式 (三阶段)
         if epoch < cfg.warmup_epochs:
-            return 1, "Warmup", 0.0, 0.0, False, cfg.warmup_lr_scale
+            return 1, "Warmup", 0.0, 0.0, False
         elif epoch < cfg.warmup_epochs + cfg.progressive_epochs:
             progress = (epoch - cfg.warmup_epochs) / cfg.progressive_epochs
             mask_ratio = (
@@ -172,35 +257,16 @@ class StagedEnsembleTrainer:
                 cfg.mask_prob_start
                 + (cfg.mask_prob_end - cfg.mask_prob_start) * progress
             )
-            return (
-                2,
-                "Progressive",
-                mask_ratio,
-                mask_prob,
-                True,
-                cfg.progressive_lr_scale,
-            )
+            return 2, "Progressive", mask_ratio, mask_prob, True
         else:
-            return (
-                3,
-                "Finetune",
-                cfg.finetune_mask_ratio,
-                cfg.finetune_mask_prob,
-                True,
-                cfg.finetune_lr_scale,
-            )
+            return 3, "Finetune", cfg.finetune_mask_ratio, cfg.finetune_mask_prob, True
 
     def _train_epoch(self, train_loader: DataLoader, epoch: int) -> float:
         """训练一个epoch"""
         criterion = nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
-        stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale = (
-            self._get_stage_info(epoch)
+        stage_num, stage_name, mask_ratio, mask_prob, use_mask = self._get_stage_info(
+            epoch
         )
-
-        # 应用阶段学习率缩放
-        stage_lr = self.cfg.lr * lr_scale
-        for worker in self.workers:
-            worker.set_lr(stage_lr)
 
         # 预计算mask（如果需要）
         for worker in self.workers:
@@ -208,9 +274,10 @@ class StagedEnsembleTrainer:
 
         total_loss = 0.0
         num_batches = 0
+        current_lr = self.workers[0].get_lr()
         iterator = tqdm(
             train_loader,
-            desc=f"Epoch {epoch + 1}/{self.cfg.total_epochs} [{stage_name}] lr={stage_lr:.6f}",
+            desc=f"Epoch {epoch + 1}/{self.cfg.total_epochs} [{stage_name}] lr={current_lr:.6f}",
         )
 
         for inputs, targets in iterator:
@@ -282,7 +349,7 @@ class StagedEnsembleTrainer:
         try:
             for epoch in range(self.cfg.total_epochs):
                 epoch_start_time = time.time()
-                stage_num, stage_name, mask_ratio, mask_prob, use_mask, lr_scale = (
+                stage_num, stage_name, mask_ratio, mask_prob, use_mask = (
                     self._get_stage_info(epoch)
                 )
 
@@ -412,76 +479,6 @@ class StagedEnsembleTrainer:
         self.logger.info(
             "🔄 Shared warmup backbone to all models, re-initialized classifier heads"
         )
-
-    def _save_checkpoint(self, tag: str):
-        """保存checkpoint"""
-        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
-        ensure_dir(checkpoint_dir)
-
-        for worker in self.workers:
-            worker.save_models(str(checkpoint_dir), self.name)
-
-        state = {
-            "epoch": len(self.history["epoch"]),
-            "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,
-            "history": self.history,
-            "early_stopping_counter": self.early_stopping.counter,
-            "total_training_time": self.total_training_time,
-            "augmentation_method": self.augmentation_method,
-            "use_curriculum": self.use_curriculum,
-            "fixed_ratio": self.fixed_ratio,
-            "fixed_prob": self.fixed_prob,
-        }
-        torch.save(state, checkpoint_dir / "trainer_state.pth")
-        self.logger.info(f"💾 Saved checkpoint: {tag}")
-
-    def load_checkpoint(self, tag: str = "best") -> bool:
-        """加载checkpoint"""
-        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
-        if not checkpoint_dir.exists():
-            self.logger.warning(f"⚠️ Checkpoint not found: {checkpoint_dir}")
-            return False
-
-        for worker in self.workers:
-            worker.load_models(str(checkpoint_dir), self.name)
-
-        state_path = checkpoint_dir / "trainer_state.pth"
-        if state_path.exists():
-            state = torch.load(state_path, weights_only=False)
-            self.best_val_loss = state["best_val_loss"]
-            self.best_epoch = state["best_epoch"]
-            self.history = state["history"]
-            self.early_stopping.counter = state.get("early_stopping_counter", 0)
-            self.total_training_time = state.get("total_training_time", 0.0)
-            self.augmentation_method = state.get(
-                "augmentation_method", self.augmentation_method
-            )
-            self.use_curriculum = state.get("use_curriculum", self.use_curriculum)
-            self.fixed_ratio = state.get("fixed_ratio", self.fixed_ratio)
-            self.fixed_prob = state.get("fixed_prob", self.fixed_prob)
-            self.logger.info(f"✅ Loaded checkpoint: {tag}")
-            self.logger.info(
-                f"   Augmentation: {self.augmentation_method}, Curriculum: {self.use_curriculum}"
-            )
-            return True
-        return False
-
-    def _cleanup_old_checkpoints(self):
-        """清理旧checkpoint"""
-        checkpoint_base = Path(self.cfg.save_dir) / "checkpoints" / self.name
-        if not checkpoint_base.exists():
-            return
-
-        epoch_dirs = [
-            d for d in checkpoint_base.iterdir() if d.name.startswith("epoch_")
-        ]
-        epoch_dirs.sort(key=lambda x: int(x.name.split("_")[1]))
-
-        if len(epoch_dirs) > self.cfg.keep_last_n_checkpoints:
-            for old_dir in epoch_dirs[: -self.cfg.keep_last_n_checkpoints]:
-                shutil.rmtree(old_dir)
-                self.logger.info(f"🗑️ Removed old checkpoint: {old_dir.name}")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗

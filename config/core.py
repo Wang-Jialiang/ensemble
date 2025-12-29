@@ -20,7 +20,7 @@ class Config:
     """三阶段课程学习集成训练配置"""
 
     # ==========================================================================
-    # [全局] 数据配置 - 被 BaseTrainer 及所有子类使用
+    # [全局] 数据配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     data_root: str  # 数据集根目录路径
     save_root: str  # 检查点/输出保存根目录
@@ -29,14 +29,14 @@ class Config:
     test_split: float  # 测试集划分比例，用于无官方划分的数据集
 
     # ==========================================================================
-    # [全局] 模型配置 - 被 BaseTrainer 及所有子类使用
+    # [全局] 模型配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     model_name: str  # 模型名称: "resnet18", "resnet50", "vgg16" 等
     num_models_per_gpu: int  # 每个 GPU 上的模型数量
     compile_model: bool  # 是否启用 PyTorch 2.0+ 编译优化 (可提升10-50%速度)
 
     # ==========================================================================
-    # [全局] 训练超参数 - 被 BaseTrainer 及所有子类使用
+    # [全局] 训练超参数 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     batch_size: int  # 批次大小
     lr: float  # 基础学习率
@@ -62,14 +62,7 @@ class Config:
     finetune_mask_prob: float  # Finetune 阶段固定应用概率
 
     # ==========================================================================
-    # [阶段训练专用] 阶段学习率缩放 - 仅 StagedEnsembleTrainer 使用
-    # ==========================================================================
-    warmup_lr_scale: float  # Warmup 阶段学习率缩放因子 (lr * scale)
-    progressive_lr_scale: float  # Progressive 阶段学习率缩放因子
-    finetune_lr_scale: float  # Finetune 阶段学习率缩放因子
-
-    # ==========================================================================
-    # [全局] 数据加载配置 - 被 BaseTrainer 及所有子类使用
+    # [全局] 数据加载配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     num_workers: int  # DataLoader 工作进程数
     pin_memory: bool  # 是否使用锁页内存加速 GPU 传输
@@ -77,14 +70,14 @@ class Config:
     prefetch_factor: int  # 每个 worker 预取的批次数
 
     # ==========================================================================
-    # [全局] 训练优化配置 - 被 BaseTrainer 及所有子类使用
+    # [全局] 训练优化配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     use_amp: bool  # 是否启用自动混合精度 (AMP)
     use_tf32: bool  # 是否启用 TF32 加速 (仅 Ampere+ GPU)
     early_stopping_patience: int  # 早停耐心值 (验证集无改善的轮数)
 
     # ==========================================================================
-    # [全局] 保存与日志配置 - 被 BaseTrainer 及所有子类使用
+    # [全局] 保存与日志配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     save_every_n_epochs: int  # 每 N 轮保存一次检查点
     keep_last_n_checkpoints: int  # 保留最近 N 个检查点
@@ -113,10 +106,16 @@ class Config:
     sgd_momentum: float  # SGD 动量 (默认 0.9)
 
     # ==========================================================================
-    # [增强专用] 数据增强参数 - Perlin/Cutout 使用
+    # [增强专用] 数据增强参数 - Perlin/Cutout/GridMask 使用
     # ==========================================================================
     cutout_fill_value: float  # Cutout 填充值 (默认 0.5)
     perlin_persistence: float  # Perlin 噪声持久度 (默认 0.5)
+    perlin_scale_ratio: float  # Perlin 噪声尺度比例 (默认 0.3)
+    gridmask_d_ratio_min: float  # GridMask 网格单元最小尺寸比例 (默认 0.2)
+    gridmask_d_ratio_max: float  # GridMask 网格单元最大尺寸比例 (默认 0.4)
+    perlin_octaves_large: int  # Perlin octaves (图像 >= 64 时, 默认 4)
+    perlin_octaves_small: int  # Perlin octaves (图像 < 64 时, 默认 3)
+    model_level_augmentation: bool  # 是否启用模型级固定 seed (每个模型固定视角)
 
     # ==========================================================================
     # [评估专用] 可视化参数
@@ -124,12 +123,12 @@ class Config:
     plot_dpi: int  # 图表保存 DPI (默认 150)
 
     # ==========================================================================
-    # [全局] 模型初始化 - 被 BaseTrainer 及所有子类使用
+    # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     init_method: str  # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
 
     # ==========================================================================
-    # [全局] 运行控制 - 被 BaseTrainer 及所有子类使用
+    # [全局] 运行控制 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
     quick_test: bool  # 快速测试模式 (减少轮数/模型数)
 
