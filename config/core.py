@@ -108,7 +108,7 @@ class Config:
     # ==========================================================================
     # [增强专用] 数据增强参数 - Perlin/Cutout/GridMask 使用
     # ==========================================================================
-    cutout_fill_value: float  # Cutout 填充值 (默认 0.5)
+
     perlin_persistence: float  # Perlin 噪声持久度 (默认 0.5)
     perlin_scale_ratio: float  # Perlin 噪声尺度比例 (默认 0.3)
     gridmask_d_ratio_min: float  # GridMask 网格单元最小尺寸比例 (默认 0.2)
@@ -141,10 +141,18 @@ class Config:
     fixed_prob: float  # 固定遮挡概率 (仅 use_curriculum=False 时生效)
     share_warmup_backbone: bool  # 是否在 warmup 后共享 backbone
 
-    # 自动计算/生成字段 (有默认值)
-    save_dir: str = ""  # 检查点保存目录 (由 __post_init__ 自动生成)
-    num_classes: int = 0
-    image_size: int = 0
+    # 自动计算/生成字段 (有默认值, 禁止人工初始化)
+    save_dir: str = field(
+        default="", init=False
+    )  # 检查点保存目录 (由 __post_init__ 自动生成)
+    num_classes: int = field(default=0, init=False)
+    image_size: int = field(default=0, init=False)
+    dataset_mean: List[float] = field(
+        default_factory=list, init=False
+    )  # 数据集均值 (Post-init 填充)
+    dataset_std: List[float] = field(
+        default_factory=list, init=False
+    )  # 数据集方差 (Post-init 填充)
     gpu_ids: List[int] = field(
         default_factory=list, init=False
     )  # 由 __post_init__ 自动设置
@@ -198,8 +206,10 @@ class Config:
             raise ValueError(f"❌ 不支持的数据集: {self.dataset_name}")
 
         DatasetClass = DATASET_REGISTRY[dataset_name]
-        self.num_classes = self.num_classes or getattr(DatasetClass, "NUM_CLASSES", 10)
-        self.image_size = self.image_size or getattr(DatasetClass, "IMAGE_SIZE", 32)
+        self.num_classes = DatasetClass.NUM_CLASSES
+        self.image_size = DatasetClass.IMAGE_SIZE
+        self.dataset_mean = DatasetClass.MEAN
+        self.dataset_std = DatasetClass.STD
 
         # 如果需要 config_overrides，可以在 DatasetClass 中定义它
         if hasattr(DatasetClass, "CONFIG_OVERRIDES"):

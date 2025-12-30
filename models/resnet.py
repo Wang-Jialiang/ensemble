@@ -271,8 +271,24 @@ class ResNet(nn.Module):
         """
         return {k: v for k, v in self.state_dict().items() if not k.startswith("fc.")}
 
-    def reinit_classifier(self) -> None:
-        """使用 Kaiming 初始化重新初始化 classifier head (fc 层)"""
-        nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
+    def reinit_classifier(self, init_method: str = "kaiming") -> None:
+        """重新初始化 classifier head (fc 层)
+
+        Args:
+            init_method: 初始化方法 ("kaiming", "xavier", "orthogonal", "default")
+        """
+        if init_method == "kaiming":
+            nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
+        elif init_method == "xavier":
+            nn.init.xavier_normal_(self.fc.weight)
+        elif init_method == "orthogonal":
+            nn.init.orthogonal_(self.fc.weight)
+        elif init_method == "default":
+            # PyTorch 默认线性层初始化 (Kaiming Uniform 变体)
+            self.fc.reset_parameters()
+        else:
+            # 默认回退到 kaiming
+            nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
+
         if self.fc.bias is not None:
             nn.init.constant_(self.fc.bias, 0)

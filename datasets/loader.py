@@ -115,10 +115,12 @@ def load_dataset(cfg):
     if cfg.domain_dataset:
         try:
             # 始终加载与 ID 数据集配套生成的 Domain 数据
-            domain_dataset = DomainShiftDataset.from_generated(
+            domain_dataset = DomainShiftDataset(
                 id_dataset=dataset_name, root=cfg.data_root
             )
-            get_logger().info(f"   Domain Shift数据集: {domain_dataset.name}")
+            get_logger().info(
+                f"   Domain Shift数据集: {domain_dataset.folder_path.name}"
+            )
         except FileNotFoundError as e:
             get_logger().warning(f"   ⚠️ Domain Shift数据集未找到 (需预生成): {e}")
 

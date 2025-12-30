@@ -17,12 +17,18 @@ Robustness 评估数据集子包
     python -m ensemble.datasets.robustness.generate --type corruption --dataset eurosat
 """
 
-from .corruption import CORRUPTIONS, SEVERITIES, CorruptionDataset
+from .corruption import (
+    CORRUPTION_CATEGORIES,
+    CORRUPTIONS,
+    SEVERITIES,
+    CorruptionDataset,
+)
 from .domain import DomainShiftDataset
 from .ood import OODDataset
 
 __all__ = [
     # Corruption
+    "CORRUPTION_CATEGORIES",
     "CORRUPTIONS",
     "SEVERITIES",
     "CorruptionDataset",

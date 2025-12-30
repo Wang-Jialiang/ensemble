@@ -113,17 +113,36 @@ class ReportGenerator:
                 models, test_loader, ood_loader, ood_name=ood_dataset.name
             )
 
-        # Domain Shift 评估
+        # Domain Shift 评估 (遍历所有 style × strength 组合)
         domain_results = None
         if domain_dataset is not None:
             get_logger().info("   🔍 Domain shift evaluation...")
-            domain_loader = domain_dataset.get_loader(config=cfg)
-            domain_results = evaluate_domain_shift(
-                models,
-                domain_loader,
-                domain_name=domain_dataset.name,
-                num_classes=cfg.num_classes,
-            )
+            domain_results = {"by_style_strength": {}, "overall_avg": 0.0}
+            all_accs = []
+
+            for style in domain_dataset.STYLES:
+                for strength in domain_dataset.STRENGTHS:
+                    try:
+                        domain_loader = domain_dataset.get_loader(style, strength, cfg)
+                        result = evaluate_domain_shift(
+                            models,
+                            domain_loader,
+                            domain_name=f"{style}_{strength}",
+                            num_classes=cfg.num_classes,
+                        )
+                        key = f"{style}_{strength}"
+                        domain_results["by_style_strength"][key] = result
+                        all_accs.append(result["domain_acc"])
+                    except FileNotFoundError:
+                        get_logger().warning(
+                            f"      跳过未生成的组合: {style}/{strength}"
+                        )
+
+            if all_accs:
+                domain_results["overall_avg"] = sum(all_accs) / len(all_accs)
+                get_logger().info(
+                    f"   ✅ Domain Overall Avg: {domain_results['overall_avg']:.2f}%"
+                )
 
         # 对抗鲁棒性评估
         adversarial_results = None

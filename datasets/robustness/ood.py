@@ -8,7 +8,7 @@ OOD 数据集模块
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...config.core import Config
@@ -40,38 +40,14 @@ class OODDataset:
 
     def __init__(
         self,
-        name: str,
-        images: torch.Tensor,
-        mean: List[float],
-        std: List[float],
-    ):
-        """直接构造函数，推荐使用 from_name()"""
-        self.name = name
-        self.images = images  # [N, C, H, W], uint8
-        self._mean = torch.tensor(mean).view(1, 3, 1, 1)
-        self._std = torch.tensor(std).view(1, 3, 1, 1)
-
-    @property
-    def num_samples(self) -> int:
-        return len(self.images)
-
-    @classmethod
-    def from_generated(
-        cls,
         id_dataset: str,
         root: str = "./data",
-    ) -> "OODDataset":
-        """从 generate.py 生成的 OOD 数据加载
+    ):
+        """OOD 数据集构造函数
 
         Args:
             id_dataset: ID 数据集名称 (用于确定标准化参数和路径)
             root: 数据根目录
-
-        Returns:
-            OODDataset 实例
-
-        Example:
-            >>> ood = OODDataset.from_generated("eurosat", root="./data")
         """
         if id_dataset not in DATASET_REGISTRY:
             raise ValueError(
@@ -79,7 +55,7 @@ class OODDataset:
             )
 
         id_class = DATASET_REGISTRY[id_dataset]
-        data_dir = Path(root) / f"{id_class.NAME}-OOD-Generated"
+        data_dir = Path(root) / f"{id_class.NAME}-OOD"
         images_path = data_dir / "images.npy"
 
         if not images_path.exists():
@@ -91,16 +67,12 @@ class OODDataset:
         get_logger().info(f"📥 加载生成的 OOD 数据: {images_path}...")
 
         images = np.load(str(images_path))  # [N, H, W, C]
-        images_tensor = torch.from_numpy(images).permute(0, 3, 1, 2)  # [N, C, H, W]
+        self.name = f"{id_class.NAME}-OOD-Generated"
+        self.images = torch.from_numpy(images).permute(0, 3, 1, 2)  # [N, C, H, W]
+        self._mean = torch.tensor(id_class.MEAN).view(1, 3, 1, 1)
+        self._std = torch.tensor(id_class.STD).view(1, 3, 1, 1)
 
-        get_logger().info(f"✅ 加载了 {len(images_tensor)} 个 OOD 样本")
-
-        return cls(
-            name=f"{id_class.NAME}-OOD-Generated",
-            images=images_tensor,
-            mean=id_class.MEAN,
-            std=id_class.STD,
-        )
+        get_logger().info(f"✅ 加载了 {len(self.images)} 个 OOD 样本")
 
     def get_loader(
         self,

@@ -11,9 +11,8 @@ constants:
   test_split: 0.2                   # 测试集划分比例 (20%)
 
   # 优化器标准参数
-  weight_decay: 0.0001              # AdamW 推荐值 (Loshchilov & Hutter, 2019)
-  max_grad_norm: 1.0                # 梯度裁剪标准阈值
-  sgd_momentum: 0.9                 # SGD 动量标准值
+  max_grad_norm: 1.0                # 梯度裁剪标准阈值 (防止梯度爆炸)
+  sgd_momentum: 0.9                 # SGD 动量标准值 (仅当 optimizer="sgd" 时生效)
   label_smoothing: 0.1              # 标签平滑 (Szegedy et al., 2016)
 
   # DataLoader 标准配置
@@ -21,9 +20,10 @@ constants:
   persistent_workers: true          # PyTorch 1.7+ 推荐
 
   # 硬件加速 (现代 GPU 标配)
-  use_amp: true                     # 自动混合精度
+  use_amp: true                     # 自动混合精度 (使用 BFloat16)
   use_tf32: true                    # TF32 加速 (Ampere+)
   compile_model: true               # PyTorch 2.0+ 编译优化
+  seed: 42                          # 随机种子 (复现性标准值)
 
   # 对抗鲁棒性评估 (Madry et al., 2018; RobustBench)
   adv_eps: 0.03137                  # ε = 8/255
@@ -34,14 +34,9 @@ constants:
   ece_n_bins: 15                    # ECE 分箱数
 
   # 数据增强标准值
-  cutout_fill_value: 0              # 归一化后黑色
   perlin_persistence: 0.5           # Perlin 噪声标准持久度
-  perlin_scale_ratio: 0.3            # Perlin 噪声尺度比例 (与 GridMask 一致)
-  gridmask_d_ratio_min: 0.2          # GridMask 网格单元最小尺寸 (占图像尺寸比例)
-  gridmask_d_ratio_max: 0.4          # GridMask 网格单元最大尺寸 (占图像尺寸比例)
   perlin_octaves_large: 4           # Perlin octaves (图像 >= 64 时)
   perlin_octaves_small: 3           # Perlin octaves (图像 < 64 时)
-  model_level_augmentation: false   # 模型级固定 seed (每个模型固定视角)
 
   # 可视化
   plot_dpi: 300                     # 图表保存 DPI
@@ -54,7 +49,7 @@ base:
   # [全局] 数据配置 - 被 StagedEnsembleTrainer 使用
   # ==========================================================================
   data_root: "./data"               # 数据集根目录路径
-  save_root: "./outputs"             # 检查点/输出保存根目录
+  save_root: "./output"             # 检查点/输出保存根目录
   dataset_name: "cifar10"           # 数据集名称: "cifar10", "cifar100", "eurosat" 等
 
   # ==========================================================================
@@ -68,10 +63,16 @@ base:
   # ==========================================================================
   batch_size: 512                   # 批次大小
   lr: 0.0015                        # 基础学习率
-  seed: 42                          # 随机种子
   optimizer: "adamw"                # 优化器: "adamw", "sgd", "adam", "rmsprop"
   scheduler: "cosine"               # 调度器: "cosine", "none"
+  weight_decay: 0.05                # 权重衰减: AdamW推荐 0.05, SGD推荐 0.0001
+  model_level_augmentation: true    # 模型级固定 seed (每个模型固定视角)
   early_stopping_patience: 20       # 早停耐心值 (验证集无改善的轮数)
+
+  # [增强细节调整]
+  perlin_scale_ratio: 0.25          # Perlin 噪声尺度比例 (0.2 约产生 2-3 个主要遮挡块)
+  gridmask_d_ratio_min: 0.15        # GridMask 最小网格 (更细碎)
+  gridmask_d_ratio_max: 0.35        # GridMask 最大网格 (避免单一遮挡)
 
   # ==========================================================================
   # [阶段训练专用] 三阶段与 Mask - 仅 StagedEnsembleTrainer 使用
@@ -79,7 +80,7 @@ base:
   warmup_epochs: 20                 # Warmup 阶段轮数
   progressive_epochs: 40            # Progressive 阶段轮数
   finetune_epochs: 20               # Finetune 阶段轮数
-  mask_pool_size: 1000              # 预生成的 Mask 池大小
+  mask_pool_size: 1024              # 预生成的 Mask 池大小
   mask_start_ratio: 0.15            # Progressive 阶段起始遮罩比例
   mask_end_ratio: 0.35              # Progressive 阶段结束遮罩比例
   mask_prob_start: 0.30             # Progressive 阶段起始应用概率
@@ -90,8 +91,8 @@ base:
   # ==========================================================================
   # [全局] 数据加载配置 - 被 StagedEnsembleTrainer 使用
   # ==========================================================================
-  num_workers: 16                   # DataLoader 工作进程数
-  prefetch_factor: 4                # 每个 worker 预取的批次数
+  num_workers: 32                   # DataLoader (EPYC 9754: 32 workers)
+  prefetch_factor: 8                # 预取队列 (1TB RAM: 激进预取)
 
   # ==========================================================================
   # [全局] 保存与日志配置 - 被 StagedEnsembleTrainer 使用
@@ -106,8 +107,8 @@ base:
   # ==========================================================================
   ensemble_strategy: "mean"         # 集成策略: "mean" (等权平均), "voting" (多数投票)
   corruption_dataset: true          # 是否加载 Corruption 数据集进行评估
-  ood_dataset: false                # 是否加载 OOD 数据集进行评估
-  domain_dataset: false             # 是否加载 Domain Shift 数据集进行评估
+  ood_dataset: true                 # 是否加载 OOD 数据集进行评估
+  domain_dataset: true              # 是否加载 Domain Shift 数据集进行评估
 
   # ==========================================================================
   # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用
@@ -126,7 +127,7 @@ base:
   use_curriculum: true              # 是否使用课程学习
   fixed_ratio: 0.25                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
   fixed_prob: 0.5                   # 固定遮挡概率 (仅 use_curriculum=false 时生效)
-  share_warmup_backbone: false      # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
+  share_warmup_backbone: true       # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
 
 # ==============================================================================
 # 实验列表

@@ -187,7 +187,13 @@ class CutoutAugmentation(AugmentationMethod):
 
     @classmethod
     def from_config(cls, device, cfg):
-        return cls(device, fill_value=cfg.cutout_fill_value)
+        # 强制使用 Black 填充: (0 - mean) / std
+        # 计算数据集归一化后的"绝对黑色"值
+        mean = np.mean(cfg.dataset_mean)
+        std = np.mean(cfg.dataset_std)
+        fill_value = (0.0 - mean) / std
+
+        return cls(device, fill_value=fill_value)
 
     def init_model_seeds(self, num_models: int, base_seed: int = None):
         """初始化模型级固定 seed"""
@@ -242,13 +248,18 @@ class PixelHaSAugmentation(AugmentationMethod):
     - 模型级: 每个模型固定 seed
     """
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, fill_value: float = 0.0):
         super().__init__(device)
+        self.fill_value = fill_value
         self.model_seeds = {}  # {model_idx: seed}
 
     @classmethod
     def from_config(cls, device, cfg):
-        return cls(device)
+        # 强制使用 Black 填充
+        mean = np.mean(cfg.dataset_mean)
+        std = np.mean(cfg.dataset_std)
+        fill_value = (0.0 - mean) / std
+        return cls(device, fill_value=fill_value)
 
     def init_model_seeds(self, num_models: int, base_seed: int = None):
         """初始化模型级固定 seed"""
@@ -280,7 +291,7 @@ class PixelHaSAugmentation(AugmentationMethod):
             # 样本级: 随机 mask
             mask = torch.rand_like(images) > ratio
 
-        augmented = images * mask.float()
+        augmented = images * mask.float() + (1 - mask.float()) * self.fill_value
         return augmented, targets
 
 
@@ -304,24 +315,33 @@ class GridMaskAugmentation(AugmentationMethod):
         device: torch.device,
         d_ratio_min: float = 0.1,
         d_ratio_max: float = 0.3,
+        fill_value: float = 0.0,
     ):
         """
         Args:
             device: 计算设备
             d_ratio_min: 网格单元最小尺寸占图像尺寸的比例 (默认 0.1 = 10%)
             d_ratio_max: 网格单元最大尺寸占图像尺寸的比例 (默认 0.3 = 30%)
+            fill_value: 遮挡填充值
         """
         super().__init__(device)
         self.d_ratio_min = d_ratio_min
         self.d_ratio_max = d_ratio_max
+        self.fill_value = fill_value
         self.model_seeds = {}  # {model_idx: seed}
 
     @classmethod
     def from_config(cls, device, cfg):
+        # 强制使用 Black 填充
+        mean = np.mean(cfg.dataset_mean)
+        std = np.mean(cfg.dataset_std)
+        fill_value = (0.0 - mean) / std
+
         return cls(
             device,
             d_ratio_min=cfg.gridmask_d_ratio_min,
             d_ratio_max=cfg.gridmask_d_ratio_max,
+            fill_value=fill_value,
         )
 
     def init_model_seeds(self, num_models: int, base_seed: int = None):
@@ -372,8 +392,12 @@ class GridMaskAugmentation(AugmentationMethod):
                         mask[y1:y2, x1:x2] = 0
 
             # 所有样本使用相同的 mask
+            # mask: 1=keep, 0=drop
+            mask_expanded = mask.unsqueeze(0)
             for b in range(B):
-                augmented[b] = images[b] * mask.unsqueeze(0)
+                augmented[b] = (
+                    images[b] * mask_expanded + (1 - mask_expanded) * self.fill_value
+                )
         else:
             # 样本级: 每个样本随机参数
             for b in range(B):
@@ -397,7 +421,10 @@ class GridMaskAugmentation(AugmentationMethod):
                         if y2 > y1 and x2 > x1:
                             mask[y1:y2, x1:x2] = 0
 
-                augmented[b] = images[b] * mask.unsqueeze(0)
+                augmented[b] = (
+                    images[b] * mask.unsqueeze(0)
+                    + (1 - mask.unsqueeze(0)) * self.fill_value
+                )
 
         return augmented, targets
 
@@ -421,6 +448,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
         octaves_large: int = 4,
         octaves_small: int = 3,
         scale_ratio: float = 0.3,
+        fill_value: float = 0.0,
     ):
         super().__init__(device)
         self.height = height
@@ -434,12 +462,18 @@ class PerlinMaskAugmentation(AugmentationMethod):
             octaves_small,
             scale_ratio,
         )
+        self.fill_value = fill_value
         self.masks = []  # 样本级共享池
         self.pool_size = pool_size
         self.model_seeds = {}  # {model_idx: seed} 模型级固定 seed
 
     @classmethod
     def from_config(cls, device, cfg):
+        # 强制使用 Black 填充
+        mean = np.mean(cfg.dataset_mean)
+        std = np.mean(cfg.dataset_std)
+        fill_value = (0.0 - mean) / std
+
         return cls(
             device,
             cfg.image_size,
@@ -449,6 +483,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
             octaves_large=cfg.perlin_octaves_large,
             octaves_small=cfg.perlin_octaves_small,
             scale_ratio=cfg.perlin_scale_ratio,
+            fill_value=fill_value,
         )
 
     def precompute_masks(self, target_ratio: float):
@@ -523,9 +558,12 @@ class PerlinMaskAugmentation(AugmentationMethod):
             if mask.shape[1] == 1:
                 mask = mask.expand(1, C, -1, -1)
             # 所有样本使用相同的 mask
+            # 所有样本使用相同的 mask
             mask_expanded = mask.squeeze(0)  # [C, H, W]
             for b in range(B):
-                augmented[b] = images[b] * mask_expanded
+                augmented[b] = (
+                    images[b] * mask_expanded + (1 - mask_expanded) * self.fill_value
+                )
         else:
             # 样本级: 从共享池随机选择
             if not self.masks:
@@ -536,7 +574,11 @@ class PerlinMaskAugmentation(AugmentationMethod):
                 mask = random.choice(self.masks)
                 if mask.shape[1] == 1:
                     mask = mask.expand(1, C, -1, -1)
-                augmented[b] = images[b] * mask.squeeze(0)
+
+                mask_expanded = mask.squeeze(0)
+                augmented[b] = (
+                    images[b] * mask_expanded + (1 - mask_expanded) * self.fill_value
+                )
 
         return augmented, targets
 

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 
 from ..config import Config
 from ..models import ModelFactory
@@ -88,9 +88,6 @@ class GPUWorker:
             # ratio 参数在训练时传入，可随阶段变化
             self.augmentation.init_model_seeds(num_models=num_models)
 
-        # AMP
-        self.scaler = GradScaler("cuda") if cfg.use_amp else None
-
         # Stream
         self.stream = torch.cuda.Stream(device=self.device)
         self._pending_loss = None
@@ -148,18 +145,17 @@ class GPUWorker:
                     )
                 else:
                     aug_inputs, aug_targets = inputs, targets
-
                 # 前向传播
-                if self.scaler:
-                    with autocast("cuda"):
+                if self.cfg.use_amp:
+                    # 使用 BFloat16, 无需 GradScaler
+                    with autocast("cuda", dtype=torch.bfloat16):
                         outputs = model(aug_inputs)
                         loss = criterion(outputs, aug_targets)
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(optimizer)
+                    loss.backward()
                     nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
-                    self.scaler.step(optimizer)
-                    self.scaler.update()
+                    optimizer.step()
                 else:
+                    # FP32: 标准训练
                     outputs = model(aug_inputs)
                     loss = criterion(outputs, aug_targets)
                     loss.backward()
@@ -234,7 +230,7 @@ class GPUWorker:
             # 加载 backbone 权重 (strict=False 因为不含 fc 层)
             model.load_state_dict(backbone_state_dict, strict=False)
             # 重新初始化 classifier head
-            model.reinit_classifier()
+            model.reinit_classifier(init_method=self.cfg.init_method)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
