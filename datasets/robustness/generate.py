@@ -1,25 +1,21 @@
 """
 ================================================================================
-统一数据生成脚本
+统一数据生成脚本 (SDXL Lightning 版)
 ================================================================================
 
 支持三种数据类型的生成:
 - Corruption: 使用 imagecorruptions 库生成损坏数据
-- Domain Shift: 使用 Stable Diffusion Img2Img 生成风格迁移数据
-- OOD: 使用 Stable Diffusion Text2Img 生成分布外数据
+- Domain Shift: 使用 SDXL Lightning Img2Img 生成风格迁移数据
+- OOD: 使用 SDXL Lightning Text2Img 生成分布外数据
 
 使用示例:
-    # Corruption
-    python -m ensemble.datasets.robustness.generate --type corruption --dataset eurosat
-
-    # Domain Shift
-    python -m ensemble.datasets.robustness.generate --type domain --dataset eurosat --styles sketch
-
-    # OOD
-    python -m ensemble.datasets.robustness.generate --type ood --dataset eurosat --num_samples 100
+    python -m ensemble.datasets.robustness.generate --type corruption --dataset cifar10
+    python -m ensemble.datasets.robustness.generate --type domain --dataset cifar10
+    python -m ensemble.datasets.robustness.generate --type ood --dataset cifar10
 """
 
 import argparse
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -29,12 +25,7 @@ from tqdm import tqdm
 
 
 def patch_dependencies():
-    """Monkey-patch dependencies for imagecorruptions compatibility.
-    1. imagecorruptions uses multichannel=True in skimage.filters.gaussian,
-       which was replaced by channel_axis=-1 in scikit-image >= 0.19.0.
-    2. imagecorruptions uses np.float_, which was removed in NumPy 2.0.
-    """
-    # Patch scikit-image
+    """Monkey-patch dependencies for imagecorruptions compatibility."""
     try:
         import skimage.filters
 
@@ -50,8 +41,6 @@ def patch_dependencies():
         skimage.filters.gaussian = patched_gaussian
     except (ImportError, AttributeError):
         pass
-
-    # Patch NumPy
     try:
         import numpy as np
 
@@ -61,22 +50,21 @@ def patch_dependencies():
         pass
 
 
-import warnings
-
 patch_dependencies()
 
 import torch
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
 
-# 过滤 imagecorruptions/pkg_resources 的过时警告
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 warnings.filterwarnings("ignore", category=UserWarning, module="imagecorruptions")
 
 try:
     from diffusers import (
-        AutoPipelineForImage2Image,
-        AutoPipelineForText2Image,
-        StableDiffusionImg2ImgPipeline,
-        StableDiffusionPipeline,
+        EulerDiscreteScheduler,
+        StableDiffusionXLImg2ImgPipeline,
+        StableDiffusionXLPipeline,
+        UNet2DConditionModel,
     )
 except ImportError:
     pass
@@ -98,76 +86,59 @@ def save_visual_comparison(
     title: str,
     num_samples: int = 8,
 ):
-    """保存原始图像与处理后图像的对比网格
-    args:
-        original_imgs: (N, H, W, C) numpy array
-        processed_imgs: (N, H, W, C) numpy array
-        output_path: 保存路径
-        title: 标题描述
-        num_samples: 展示的样本数量
-    """
+    """保存原始图像与处理后图像的对比网格"""
     n = min(len(original_imgs), num_samples)
     if n == 0:
         return
 
-    # 选取样本
     indices = np.linspace(0, len(original_imgs) - 1, n, dtype=int)
     orig = original_imgs[indices]
     proc = processed_imgs[indices]
 
     h, w = orig.shape[1:3]
-    # 创建网格 (2行, n列)
     grid = Image.new("RGB", (w * n, h * 2))
 
-    for i in range(n):
-        # 第一行: 原图
-        grid.paste(Image.fromarray(orig[i].astype(np.uint8)), (i * w, 0))
-        # 第二行: 处理图
-        grid.paste(Image.fromarray(proc[i].astype(np.uint8)), (i * w, h))
+    for i, (o, p) in enumerate(zip(orig, proc)):
+        grid.paste(Image.fromarray(o.astype(np.uint8)), (i * w, 0))
+        grid.paste(Image.fromarray(p.astype(np.uint8)), (i * w, h))
 
-    grid.save(output_path)
-    get_logger().info(
-        f"📊 可视化结果已保存至: {output_path} (第一行: 原图, 第二行: {title})"
-    )
+    ensure_dir(output_path.parent)
+    grid.save(str(output_path))
+    get_logger().info(f"📊 可视化保存: {output_path}")
 
 
 # =============================================================================
-# 图像处理与硬件助手 (内部使用)
+# 图像处理工具
 # =============================================================================
 
 
-def _prepare_pil_batch(images_np: np.ndarray, target_size: int = 512) -> list:
+def _prepare_pil_batch(images_np: np.ndarray, target_size: int = 1024):
     """将 numpy 批量图像转换为 PIL 格式并统一缩放"""
     return [
         Image.fromarray(img.astype(np.uint8)).resize(
-            (target_size, target_size), Image.Resampling.LANCZOS
+            (target_size, target_size), Image.LANCZOS
         )
         for img in images_np
     ]
 
 
-def _convert_to_numpy_batch(images_pil: list, target_size: tuple) -> list:
+def _convert_to_numpy_batch(images_pil: list, target_size: tuple):
     """将 PIL 批量图像恢复到目标尺寸并转回 numpy 格式"""
-    return [
-        np.array(img.resize(target_size, Image.Resampling.LANCZOS))
-        for img in images_pil
-    ]
+    return [np.array(img.resize(target_size, Image.LANCZOS)) for img in images_pil]
 
 
-def _get_gpu_id(device: str) -> int:
-    """从设备字符串中提取 GPU ID，用于 tqdm 位置控制"""
-    if "cuda:" in device:
-        try:
-            return int(device.split(":")[-1])
-        except (ValueError, IndexError):
-            pass
-    return 0
+def _get_gpu_id(device: str):
+    """从设备字符串中提取 GPU ID"""
+    try:
+        return int(device.split(":")[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
-def _check_existing_dataset(output_dir: Path, force: bool) -> bool:
-    """检查数据集是否已存在，返回 True 表示可以跳过生成"""
+def _check_existing_dataset(output_dir: Path, force: bool):
+    """检查数据集是否已存在"""
     if output_dir.exists() and not force:
-        get_logger().info(f"✅ {output_dir} 已存在，跳过生成 (使用 --force 强制重新生成)")
+        get_logger().info(f"⏭️ 数据集已存在: {output_dir}，跳过生成")
         return True
     ensure_dir(output_dir)
     return False
@@ -186,10 +157,10 @@ def _load_test_set_numpy(DatasetClass, root, seed=42):
 
 def _sample_dataset(images_np, labels_np, n, seed=42):
     """对数据集进行随机抽样"""
-    total = len(labels_np)
-    target_n = min(n or total, total)
+    if n is None or n >= len(images_np):
+        return images_np, labels_np
     np.random.seed(seed)
-    indices = np.random.permutation(total)[:target_n]
+    indices = np.random.choice(len(images_np), size=n, replace=False)
     return images_np[indices], labels_np[indices]
 
 
@@ -199,11 +170,7 @@ def _sample_dataset(images_np, labels_np, n, seed=42):
 
 
 class CorruptionGenerator:
-    """Corruption 生成器 - 基于 imagecorruptions 库
-
-    使用 imagecorruptions 库实现与 ImageNet-C 相同的 corruption 类型。
-    依赖: pip install imagecorruptions
-    """
+    """Corruption 生成器 - 基于 imagecorruptions 库"""
 
     CORRUPTIONS = CORRUPTIONS
     SEVERITIES = SEVERITIES
@@ -218,10 +185,6 @@ class CorruptionGenerator:
 
         if corruption_type not in CorruptionGenerator.CORRUPTIONS:
             raise ValueError(f"Unknown corruption: {corruption_type}")
-
-        if severity not in CorruptionGenerator.SEVERITIES:
-            if not 1 <= severity <= 5:
-                raise ValueError(f"Severity must be 1-5, got {severity}")
 
         img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
         corrupted = corrupt(
@@ -239,58 +202,127 @@ class CorruptionGenerator:
         """批量应用 corruption"""
         if seed is not None:
             np.random.seed(seed)
-
-        corrupted = []
-        for img in images:
-            c_img = CorruptionGenerator.apply(img, corruption_type, severity)
-            corrupted.append(c_img)
-
-        return np.stack(corrupted)
+        return np.stack(
+            [
+                CorruptionGenerator.apply(img, corruption_type, severity)
+                for img in images
+            ]
+        )
 
 
 # =============================================================================
-# Domain Shift 生成器
+# SDXL Lightning Pipeline 加载器
+# =============================================================================
+
+
+class LightningPipelineLoader:
+    """SDXL Lightning Pipeline 加载器 (单例模式)"""
+
+    _text2img_cache = {}
+    _img2img_cache = {}
+
+    @classmethod
+    def get_text2img(
+        cls, device: str, base_model: str, repo: str, ckpt: str
+    ) -> "StableDiffusionXLPipeline":
+        """获取 Text2Img Pipeline (带缓存)"""
+        if device not in cls._text2img_cache:
+            get_logger().info(f"📥 [{device}] 加载 SDXL Lightning Text2Img...")
+            unet = cls._load_unet(device, base_model, repo, ckpt)
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                base_model, unet=unet, torch_dtype=torch.float16, variant="fp16"
+            ).to(device)
+            pipe.scheduler = EulerDiscreteScheduler.from_config(
+                pipe.scheduler.config, timestep_spacing="trailing"
+            )
+            pipe.set_progress_bar_config(disable=True)
+            cls._try_enable_optimizations(pipe)
+            cls._text2img_cache[device] = pipe
+        return cls._text2img_cache[device]
+
+    @classmethod
+    def get_img2img(
+        cls, device: str, base_model: str, repo: str, ckpt: str
+    ) -> "StableDiffusionXLImg2ImgPipeline":
+        """获取 Img2Img Pipeline (带缓存)"""
+        if device not in cls._img2img_cache:
+            get_logger().info(f"📥 [{device}] 加载 SDXL Lightning Img2Img...")
+            unet = cls._load_unet(device, base_model, repo, ckpt)
+            pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+                base_model, unet=unet, torch_dtype=torch.float16, variant="fp16"
+            ).to(device)
+            pipe.scheduler = EulerDiscreteScheduler.from_config(
+                pipe.scheduler.config, timestep_spacing="trailing"
+            )
+            pipe.set_progress_bar_config(disable=True)
+            cls._try_enable_optimizations(pipe)
+            cls._img2img_cache[device] = pipe
+        return cls._img2img_cache[device]
+
+    @staticmethod
+    def _load_unet(device: str, base_model: str, repo: str, ckpt: str):
+        """加载 Lightning UNet (支持本地路径)"""
+        unet = UNet2DConditionModel.from_config(base_model, subfolder="unet").to(
+            device, torch.float16
+        )
+
+        local_path = Path(repo) / ckpt
+        if local_path.exists():
+            get_logger().info(f"🚀 加载本地 Lightning 权重: {local_path}")
+            state_dict = load_file(str(local_path), device=device)
+        else:
+            get_logger().info(f"🌐 从 Hugging Face 下载权重: {repo}/{ckpt}")
+            state_dict = load_file(hf_hub_download(repo, ckpt), device=device)
+
+        unet.load_state_dict(state_dict)
+        return unet
+
+    @staticmethod
+    def _try_enable_optimizations(pipe):
+        """尝试启用显存优化"""
+        try:
+            pipe.enable_xformers_memory_efficient_attention()
+        except Exception:
+            pass
+
+
+# =============================================================================
+# Domain Shift 生成器 (SDXL Lightning)
 # =============================================================================
 
 
 class DomainGenerator:
-    """Domain Shift 生成器 - 基于 Stable Diffusion Img2Img"""
+    """Domain Shift 生成器 - 基于 SDXL Lightning Img2Img"""
 
     def __init__(
         self,
         device: str = "cuda",
-        model_path: Optional[str] = None,
+        base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
+        lightning_repo: str = "ByteDance/SDXL-Lightning",
+        lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
         styles: Optional[dict] = None,
-        strengths: Optional[list] = None,
+        num_steps: int = 4,
     ):
         self.device = device
-        self.model_path = model_path
+        self.base_model = base_model
+        self.lightning_repo = lightning_repo
+        self.lightning_ckpt = lightning_ckpt
         self.styles = styles or {}
+        self.num_steps = num_steps
         self._pipe = None
 
     def _get_pipe(self):
-        """延迟加载标准 SD pipeline"""
+        """获取 Img2Img Pipeline"""
         if self._pipe is None:
-            get_logger().info(f"📥 加载 SD Img2Img: {self.model_path} ({self.device})")
-            self._pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float16 if "cuda" in self.device else torch.float32,
-            ).to(self.device)
-            self._pipe.set_progress_bar_config(disable=True)
-            self._enable_optimizations()
+            self._pipe = LightningPipelineLoader.get_img2img(
+                self.device, self.base_model, self.lightning_repo, self.lightning_ckpt
+            )
         return self._pipe
 
-    def _enable_optimizations(self):
-        """启用显存优化"""
-        try:
-            self._pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass
-
     def apply_batch(
-        self, images: np.ndarray, style: str, strength: float, batch_size: int = 16
+        self, images: np.ndarray, style: str, strength: float, batch_size: int = 24
     ) -> np.ndarray:
-        """批量风格转换 (主干逻辑)"""
+        """批量风格转换"""
         if style not in self.styles:
             raise ValueError(f"Unknown style: {style}")
 
@@ -310,159 +342,61 @@ class DomainGenerator:
             batch = images[i : i + batch_size]
             orig_h, orig_w = batch.shape[1], batch.shape[2]
 
-            # 1. 预处理
-            pils = _prepare_pil_batch(batch, target_size=512)
-
-            # 2. 推理
-            outputs = pipe(
-                prompt=[prompt] * len(pils),
-                image=pils,
-                strength=strength,
-                guidance_scale=7.5,
-                num_inference_steps=30,
-            ).images
-
-            # 3. 后处理
-            results.extend(_convert_to_numpy_batch(outputs, (orig_w, orig_h)))
-
-        return np.stack(results)
-
-    def apply(self, img: np.ndarray, style: str, strength: float) -> np.ndarray:
-        return self.apply_batch(np.expand_dims(img, 0), style, strength, batch_size=1)[
-            0
-        ]
-
-
-# =============================================================================
-# Domain Shift 生成器 (SDXL Turbo 极速版)
-# =============================================================================
-
-
-class TurboDomainGenerator:
-    """Domain Shift 生成器 - 基于 SDXL Turbo (极速版)"""
-
-    def __init__(
-        self,
-        device: str = "cuda",
-        model_path: Optional[str] = None,
-        styles: Optional[dict] = None,
-        strengths: Optional[list] = None,
-        num_steps: int = 1,
-    ):
-        self.device = device
-        self.model_path = model_path or "stabilityai/sdxl-turbo"
-        self.styles = styles or {}
-        self.num_steps = num_steps
-        self._pipe = None
-
-    def _get_pipe(self):
-        """延迟加载 SDXL Turbo pipeline"""
-        if self._pipe is None:
-            get_logger().info(f"� 加载 SDXL Turbo Img2Img: {self.model_path}")
-            self._pipe = AutoPipelineForImage2Image.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float16 if "cuda" in self.device else torch.float32,
-                variant="fp16" if "cuda" in self.device else None,
-            ).to(self.device)
-            self._pipe.set_progress_bar_config(disable=True)
-            self._enable_optimizations()
-        return self._pipe
-
-    def _enable_optimizations(self):
-        try:
-            self._pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass
-
-    def apply_batch(
-        self, images: np.ndarray, style: str, strength: float, batch_size: int = 16
-    ) -> np.ndarray:
-        """批量风格转换 (Turbo 极速版)"""
-        if style not in self.styles:
-            raise ValueError(f"Unknown style: {style}")
-
-        pipe = self._get_pipe()
-        prompt = self.styles[style]
-        results = []
-
-        pbar = tqdm(
-            range(0, len(images), batch_size),
-            desc=f"      [{self.device}] {style}/{strength} (Turbo)",
-            position=_get_gpu_id(self.device),
-            leave=False,
-            mininterval=1.0,
-        )
-
-        for i in pbar:
-            batch = images[i : i + batch_size]
-            orig_h, orig_w = batch.shape[1], batch.shape[2]
-
-            # 1. 预处理 (SDXL Turbo 512x512)
-            pils = _prepare_pil_batch(batch, target_size=512)
-
-            # 2. 推理
+            pils = _prepare_pil_batch(batch, target_size=1024)
             outputs = pipe(
                 prompt=[prompt] * len(pils),
                 image=pils,
                 strength=strength,
                 guidance_scale=0.0,
-                num_inference_steps=max(int(1 / strength), self.num_steps),
+                num_inference_steps=self.num_steps,
             ).images
 
-            # 3. 后处理
             results.extend(_convert_to_numpy_batch(outputs, (orig_w, orig_h)))
 
         return np.stack(results)
 
-    def apply(self, img: np.ndarray, style: str, strength: float) -> np.ndarray:
-        return self.apply_batch(np.expand_dims(img, 0), style, strength, batch_size=1)[0]
-
 
 # =============================================================================
-# OOD 生成器
+# OOD 生成器 (SDXL Lightning)
 # =============================================================================
 
 
 class OODGenerator:
-    """OOD 生成器 - 基于 Stable Diffusion Text2Img"""
+    """OOD 生成器 - 基于 SDXL Lightning Text2Img"""
 
     def __init__(
         self,
         device: str = "cuda",
-        model_path: Optional[str] = None,
+        base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
+        lightning_repo: str = "ByteDance/SDXL-Lightning",
+        lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
         prompts: Optional[list] = None,
+        num_steps: int = 4,
     ):
         self.device = device
-        self.model_path = model_path
+        self.base_model = base_model
+        self.lightning_repo = lightning_repo
+        self.lightning_ckpt = lightning_ckpt
         self.prompts = prompts or []
+        self.num_steps = num_steps
         self._pipe = None
 
     def _get_pipe(self):
-        """延迟加载标准 SD pipeline"""
+        """获取 Text2Img Pipeline"""
         if self._pipe is None:
-            get_logger().info(f"📥 加载 SD Text2Img: {self.model_path} ({self.device})")
-            self._pipe = StableDiffusionPipeline.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float16 if "cuda" in self.device else torch.float32,
-            ).to(self.device)
-            self._pipe.set_progress_bar_config(disable=True)
-            self._enable_optimizations()
+            self._pipe = LightningPipelineLoader.get_text2img(
+                self.device, self.base_model, self.lightning_repo, self.lightning_ckpt
+            )
         return self._pipe
-
-    def _enable_optimizations(self):
-        try:
-            self._pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass
 
     def generate_batch(
         self,
         num_samples: int,
         target_size: int = 64,
-        batch_size: int = 16,
+        batch_size: int = 24,
         seed: Optional[int] = None,
     ) -> np.ndarray:
-        """批量生成 OOD 图像 (标准版)"""
+        """批量生成 OOD 图像"""
         import random
 
         if seed is not None:
@@ -483,108 +417,17 @@ class OODGenerator:
             current_bs = min(batch_size, num_samples - i)
             prompts = [random.choice(self.prompts) for _ in range(current_bs)]
 
-            # 1. 生成 (Text2Img 不需要预处理图像)
             outputs = pipe(
                 prompt=prompts,
-                height=512,
-                width=512,
-                guidance_scale=7.5,
-                num_inference_steps=30,
-            ).images
-
-            # 2. 后处理
-            results.extend(_convert_to_numpy_batch(outputs, (target_size, target_size)))
-
-        return np.stack(results)
-
-    def generate(self, target_size: int = 64, seed: Optional[int] = None) -> np.ndarray:
-        return self.generate_batch(1, target_size, batch_size=1, seed=seed)[0]
-
-
-# =============================================================================
-# OOD 生成器 (SDXL Turbo 极速版)
-# =============================================================================
-
-
-class TurboOODGenerator:
-    """OOD 生成器 - 基于 SDXL Turbo (极速版)"""
-
-    def __init__(
-        self,
-        device: str = "cuda",
-        model_path: Optional[str] = None,
-        prompts: Optional[list] = None,
-        num_steps: int = 1,
-    ):
-        self.device = device
-        self.model_path = model_path or "stabilityai/sdxl-turbo"
-        self.prompts = prompts or []
-        self.num_steps = num_steps
-        self._pipe = None
-
-    def _get_pipe(self):
-        """延迟加载 SDXL Turbo pipeline"""
-        if self._pipe is None:
-            get_logger().info(f"� 加载 SDXL Turbo Text2Img: {self.model_path}")
-            self._pipe = AutoPipelineForText2Image.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float16 if "cuda" in self.device else torch.float32,
-                variant="fp16" if "cuda" in self.device else None,
-            ).to(self.device)
-            self._pipe.set_progress_bar_config(disable=True)
-            self._enable_optimizations()
-        return self._pipe
-
-    def _enable_optimizations(self):
-        try:
-            self._pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass
-
-    def generate_batch(
-        self,
-        num_samples: int,
-        target_size: int = 64,
-        batch_size: int = 16,
-        seed: Optional[int] = None,
-    ) -> np.ndarray:
-        """批量生成 OOD 图像 (Turbo 极速版)"""
-        import random
-
-        if seed is not None:
-            random.seed(seed)
-
-        pipe = self._get_pipe()
-        results = []
-
-        pbar = tqdm(
-            range(0, num_samples, batch_size),
-            desc=f"      [{self.device}] OOD 生成 (Turbo)",
-            position=_get_gpu_id(self.device),
-            leave=False,
-            mininterval=1.0,
-        )
-
-        for i in pbar:
-            current_bs = min(batch_size, num_samples - i)
-            prompts = [random.choice(self.prompts) for _ in range(current_bs)]
-
-            # 1. 推理
-            outputs = pipe(
-                prompt=prompts,
-                height=512,
-                width=512,
+                height=1024,
+                width=1024,
                 guidance_scale=0.0,
                 num_inference_steps=self.num_steps,
             ).images
 
-            # 2. 后处理
             results.extend(_convert_to_numpy_batch(outputs, (target_size, target_size)))
 
         return np.stack(results)
-
-    def generate(self, target_size: int = 64, seed: Optional[int] = None) -> np.ndarray:
-        return self.generate_batch(1, target_size, batch_size=1, seed=seed)[0]
 
 
 # =============================================================================
@@ -616,46 +459,35 @@ def _worker_domain(
     output_dir,
     dataset_name,
     batch_size,
-    model_path=None,
-    full_styles_dict=None,
-    use_turbo=False,
-    turbo_steps=1,
+    base_model,
+    lightning_repo,
+    lightning_ckpt,
+    full_styles_dict,
+    num_steps,
 ):
     """Domain 工作者线程 (用于 GPU 并行)"""
-    if use_turbo:
-        generator = TurboDomainGenerator(
-            device=device,
-            model_path=model_path,
-            styles=full_styles_dict,
-            strengths=strengths,
-            num_steps=turbo_steps,
-        )
-    else:
-        generator = DomainGenerator(
-            device=device,
-            model_path=model_path,
-            styles=full_styles_dict,
-            strengths=strengths,
-        )
+    generator = DomainGenerator(
+        device=device,
+        base_model=base_model,
+        lightning_repo=lightning_repo,
+        lightning_ckpt=lightning_ckpt,
+        styles=full_styles_dict,
+        num_steps=num_steps,
+    )
     DatasetClass = DATASET_REGISTRY[dataset_name]
 
     for style in styles:
         for strength in strengths:
-            mode_str = "Turbo" if use_turbo else "SD"
-            get_logger().info(
-                f"   [{device}] ({mode_str}) 生成: {style} (strength={strength})..."
-            )
+            get_logger().info(f"   [{device}] 生成: {style} (strength={strength})...")
             strength_dir = output_dir / style / str(strength)
 
             for class_idx in range(DatasetClass.NUM_CLASSES):
                 ensure_dir(strength_dir / f"class_{class_idx:04d}")
 
-            # 使用包装好的 apply_batch
             styled_images = generator.apply_batch(
                 images_np, style, strength, batch_size=batch_size
             )
 
-            # 保存
             for i, (img, label) in enumerate(zip(styled_images, labels_np)):
                 img_path = strength_dir / f"class_{label:04d}" / f"img_{i}.png"
                 Image.fromarray(img).save(str(img_path))
@@ -666,27 +498,25 @@ def _worker_ood_gpu(
     n,
     target_size,
     bs,
-    s,
+    seed,
     q,
-    model_path=None,
-    prompts=None,
-    use_turbo=False,
-    turbo_steps=1,
+    base_model,
+    lightning_repo,
+    lightning_ckpt,
+    prompts,
+    num_steps,
 ):
     """OOD 工作者线程 (用于 GPU 并行)"""
-    if use_turbo:
-        generator = TurboOODGenerator(
-            device=f"cuda:{gpu_id}",
-            model_path=model_path,
-            prompts=prompts,
-            num_steps=turbo_steps,
-        )
-    else:
-        generator = OODGenerator(
-            device=f"cuda:{gpu_id}", model_path=model_path, prompts=prompts
-        )
+    generator = OODGenerator(
+        device=f"cuda:{gpu_id}",
+        base_model=base_model,
+        lightning_repo=lightning_repo,
+        lightning_ckpt=lightning_ckpt,
+        prompts=prompts,
+        num_steps=num_steps,
+    )
     imgs = generator.generate_batch(
-        num_samples=n, target_size=target_size, batch_size=bs, seed=s + gpu_id
+        num_samples=n, target_size=target_size, batch_size=bs, seed=seed + gpu_id
     )
     q.put(imgs)
 
@@ -715,49 +545,223 @@ def generate_corruption_dataset(
     if _check_existing_dataset(output_dir, force):
         return output_dir
 
-    get_logger().info(f"🔧 生成 Corruption: {DatasetClass.NAME}-C (EPYC 并行)...")
+    get_logger().info(f"🔧 生成 Corruption: {DatasetClass.NAME}-C...")
 
-    # 1. 加载并转换
     images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
     total_samples = len(labels_np)
 
-    # 2. 准备并行任务
     tasks = [(c, images_np, SEVERITIES, output_dir, seed) for c in CORRUPTIONS]
     num_cpus = os.cpu_count()
 
     with multiprocessing.Pool(processes=min(len(CORRUPTIONS), num_cpus)) as pool:
-        list(tqdm(pool.imap_unordered(_process_single_corruption, tasks), total=len(tasks), desc="   Corruption 总进度"))
+        list(
+            tqdm(
+                pool.imap_unordered(_process_single_corruption, tasks),
+                total=len(tasks),
+                desc="   Corruption 总进度",
+            )
+        )
 
-    # 3. 保存标签
     np.save(str(output_dir / "labels.npy"), labels_np)
 
-    get_logger().info(f"✅ {DatasetClass.NAME}-C 生成完成: {len(CORRUPTIONS)} corruptions × {total_samples} samples")
+    get_logger().info(
+        f"✅ {DatasetClass.NAME}-C 生成完成: {len(CORRUPTIONS)} corruptions × {total_samples} samples"
+    )
     return output_dir
 
 
-def visualize_corruption(
+def generate_domain_dataset(
     dataset_name: str,
     root: str = "./data",
-    num_vis: int = 8,
-):
+    samples_per_group: Optional[int] = 1000,
+    seed: int = 42,
+    force: bool = False,
+    batch_size: int = 24,
+    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
+    lightning_repo: str = "ByteDance/SDXL-Lightning",
+    lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
+    styles: Optional[dict] = None,
+    strengths: Optional[list] = None,
+    num_steps: int = 4,
+) -> Path:
+    """预生成 domain shift 数据集"""
+    import multiprocessing
+
+    if dataset_name not in DATASET_REGISTRY:
+        raise ValueError(f"未知数据集: {dataset_name}")
+
+    DatasetClass = DATASET_REGISTRY[dataset_name]
+    output_dir = Path(root) / f"{DatasetClass.NAME}-Domain"
+
+    if _check_existing_dataset(output_dir, force):
+        return output_dir
+
+    images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
+    images_np, labels_np = _sample_dataset(
+        images_np, labels_np, samples_per_group, seed
+    )
+
+    num_gpus = torch.cuda.device_count()
+    get_logger().info(
+        f"🔧 生成 Domain: {DatasetClass.NAME} (SDXL Lightning 4-step, GPU={num_gpus})"
+    )
+
+    styles_list = list(styles.keys()) if styles else []
+
+    if num_gpus == 0:
+        # CPU 串行模式
+        generator = DomainGenerator(
+            device="cpu",
+            base_model=base_model,
+            lightning_repo=lightning_repo,
+            lightning_ckpt=lightning_ckpt,
+            styles=styles,
+            num_steps=num_steps,
+        )
+        for style in styles_list:
+            for str_val in strengths:
+                strength_dir = output_dir / style / str(str_val)
+                for c in range(DatasetClass.NUM_CLASSES):
+                    ensure_dir(strength_dir / f"class_{c:04d}")
+                styled = generator.apply_batch(
+                    images_np, style, str_val, batch_size=batch_size
+                )
+                for i, (img, lbl) in enumerate(zip(styled, labels_np)):
+                    Image.fromarray(img).save(
+                        str(strength_dir / f"class_{lbl:04d}" / f"img_{i}.png")
+                    )
+    else:
+        # GPU 并行模式
+        processes = []
+        for i in range(num_gpus):
+            gpu_styles = styles_list[i::num_gpus]
+            if not gpu_styles:
+                continue
+            p = multiprocessing.Process(
+                target=_worker_domain,
+                args=(
+                    f"cuda:{i}",
+                    gpu_styles,
+                    strengths,
+                    images_np,
+                    labels_np,
+                    output_dir,
+                    dataset_name,
+                    batch_size,
+                    base_model,
+                    lightning_repo,
+                    lightning_ckpt,
+                    styles,
+                    num_steps,
+                ),
+            )
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
+
+    get_logger().info(f"✅ {DatasetClass.NAME}-Domain 生成完成!")
+    return output_dir
+
+
+def generate_ood_dataset(
+    dataset_name: str,
+    root: str = "./data",
+    num_samples: int = 1000,
+    seed: int = 42,
+    force: bool = False,
+    batch_size: int = 24,
+    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
+    lightning_repo: str = "ByteDance/SDXL-Lightning",
+    lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
+    prompts: Optional[list] = None,
+    num_steps: int = 4,
+) -> Path:
+    """预生成 OOD 数据集"""
+    if dataset_name not in DATASET_REGISTRY:
+        raise ValueError(f"未知数据集: {dataset_name}")
+
+    DatasetClass = DATASET_REGISTRY[dataset_name]
+    output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
+
+    if _check_existing_dataset(output_dir, force):
+        return output_dir
+
+    get_logger().info(
+        f"🔧 生成 OOD: {DatasetClass.NAME} ({num_samples} 张, SDXL Lightning 4-step)"
+    )
+
+    num_gpus = torch.cuda.device_count()
+    if num_gpus <= 1:
+        device = "cuda:0" if num_gpus == 1 else "cpu"
+        generator = OODGenerator(
+            device=device,
+            base_model=base_model,
+            lightning_repo=lightning_repo,
+            lightning_ckpt=lightning_ckpt,
+            prompts=prompts,
+            num_steps=num_steps,
+        )
+        imgs = generator.generate_batch(
+            num_samples=num_samples,
+            target_size=DatasetClass.IMAGE_SIZE,
+            batch_size=batch_size,
+            seed=seed,
+        )
+        np.save(str(output_dir / "images.npy"), imgs)
+    else:
+        import multiprocessing
+
+        samples_per_gpu = num_samples // num_gpus
+        q = multiprocessing.Queue()
+        processes = []
+
+        for i in range(num_gpus):
+            gpu_n = samples_per_gpu + (
+                num_samples % num_gpus if i == num_gpus - 1 else 0
+            )
+            p = multiprocessing.Process(
+                target=_worker_ood_gpu,
+                args=(
+                    i,
+                    gpu_n,
+                    DatasetClass.IMAGE_SIZE,
+                    batch_size,
+                    seed,
+                    q,
+                    base_model,
+                    lightning_repo,
+                    lightning_ckpt,
+                    prompts,
+                    num_steps,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        all_imgs = [q.get() for _ in range(num_gpus)]
+        for p in processes:
+            p.join()
+        np.save(str(output_dir / "images.npy"), np.concatenate(all_imgs, axis=0))
+
+    get_logger().info(f"✅ {DatasetClass.NAME}-OOD 生成完成!")
+    return output_dir
+
+
+def visualize_corruption(dataset_name: str, root: str = "./data", num_vis: int = 8):
     """为 Corruption 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
     output_dir = Path(root) / f"{DatasetClass.NAME}-C"
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
-    # 加载测试集
     test_dataset = DatasetClass(root=root, train=False)
     images_np = test_dataset.images.permute(0, 2, 3, 1).numpy()
 
     get_logger().info("🎨 正在生成 Corruption 可视化对比图...")
 
-    # 随机选几种 corruption 和 severity
-    sample_corruptions = ["gaussian_noise", "shot_noise", "fog", "snow", "glass_blur"]
-    sample_corruptions = [c for c in sample_corruptions if c in CORRUPTIONS]
-
-    for c in sample_corruptions:
-        for s in [3, 5]:  # 只对比中等和最高强度
+    for c in ["gaussian_noise", "fog", "glass_blur"]:
+        for s in [3, 5]:
             corrupted = CorruptionGenerator.apply_batch(
                 images_np[:num_vis], c, s, seed=42
             )
@@ -770,100 +774,8 @@ def visualize_corruption(
             )
 
 
-def generate_domain_dataset(
-    dataset_name: str,
-    root: str = "./data",
-    samples_per_group: Optional[int] = 1000,
-    seed: int = 42,
-    force: bool = False,
-    batch_size: int = 16,
-    model_path: Optional[str] = None,
-    styles: Optional[dict] = None,
-    strengths: Optional[list] = None,
-    use_turbo: bool = False,
-    turbo_steps: int = 1,
-) -> Path:
-    """预生成 domain shift 数据集 (外层接口)"""
-    import multiprocessing
-
-    if dataset_name not in DATASET_REGISTRY:
-        raise ValueError(f"未知数据集: {dataset_name}")
-
-    DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-Domain"
-
-    if _check_existing_dataset(output_dir, force):
-        return output_dir
-
-    # 1. 加载并抽样
-    images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
-    images_np, labels_np = _sample_dataset(images_np, labels_np, samples_per_group, seed)
-
-    # 2. 选择模式与 GPU 分发
-    num_gpus = torch.cuda.device_count()
-    mode_str = "SDXL Turbo" if use_turbo else "SD 2.1"
-    get_logger().info(f"🔧 生成 Domain: {DatasetClass.NAME} ({mode_str}, GPU={num_gpus})")
-
-    styles_list = list(styles.keys()) if styles else []
-
-    if num_gpus == 0:
-        _run_domain_serial(
-            output_dir, images_np, labels_np, styles, strengths, model_path,
-            batch_size, use_turbo, turbo_steps, DatasetClass
-        )
-    else:
-        _run_domain_parallel(
-            output_dir, images_np, labels_np, styles_list, strengths, model_path,
-            batch_size, use_turbo, turbo_steps, dataset_name, styles
-        )
-
-    get_logger().info(f"✅ {DatasetClass.NAME}-Domain 生成完成!")
-    return output_dir
-
-
-def _run_domain_serial(output_dir, images, labels, styles_dict, strengths, model_path, bs, turbo, steps, DatasetClass):
-    """单进程回退模式 (CPU 或单 GPU 强制串行)"""
-    get_logger().warning("使用串行模式生成，速度较慢...")
-    if turbo:
-        generator = TurboDomainGenerator(device="cpu", model_path=model_path, styles=styles_dict, strengths=strengths, num_steps=steps)
-    else:
-        generator = DomainGenerator(device="cpu", model_path=model_path, styles=styles_dict, strengths=strengths)
-
-    for style, prompt in styles_dict.items():
-        for str_val in strengths:
-            strength_dir = output_dir / style / str(str_val)
-            for c in range(DatasetClass.NUM_CLASSES): ensure_dir(strength_dir / f"class_{c:04d}")
-
-            styled = generator.apply_batch(images, style, str_val, batch_size=bs)
-            for i, (img, lbl) in enumerate(zip(styled, labels)):
-                Path(strength_dir / f"class_{lbl:04d}" / f"img_{i}.png").parent.mkdir(parents=True, exist_ok=True)
-                Image.fromarray(img).save(str(strength_dir / f"class_{lbl:04d}" / f"img_{i}.png"))
-
-
-def _run_domain_parallel(output_dir, images, labels, styles_list, strengths, model_path, bs, turbo, steps, dataset_name, styles_dict):
-    """多 GPU 并行分发"""
-    import multiprocessing
-    num_gpus = torch.cuda.device_count()
-    processes = []
-    for i in range(num_gpus):
-        gpu_styles = styles_list[i::num_gpus]
-        if not gpu_styles: continue
-        p = multiprocessing.Process(
-            target=_worker_domain,
-            args=(f"cuda:{i}", gpu_styles, strengths, images, labels, output_dir, dataset_name, bs, model_path, styles_dict, turbo, steps)
-        )
-        p.start()
-        processes.append(p)
-    for p in processes: p.join()
-
-
 def visualize_domain(
-    dataset_name: str,
-    root: str = "./data",
-    num_vis: int = 8,
-    seed: int = 42,
-    model_path: Optional[str] = None,
-    styles: Optional[dict] = None,
+    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None
 ):
     """为 Domain Shift 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
@@ -871,7 +783,6 @@ def visualize_domain(
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
-    # 加载样本
     test_dataset = DatasetClass(root=root, train=False)
     images_np = test_dataset.images.permute(0, 2, 3, 1).numpy()[:num_vis]
 
@@ -879,12 +790,14 @@ def visualize_domain(
 
     generator = DomainGenerator(
         device="cuda" if torch.cuda.is_available() else "cpu",
-        model_path=model_path,
-        styles=styles,
+        base_model=gen_cfg.base_model,
+        lightning_repo=gen_cfg.lightning_repo,
+        lightning_ckpt=gen_cfg.lightning_ckpt,
+        styles=gen_cfg.styles,
+        num_steps=gen_cfg.num_steps,
     )
 
-    style_names = list(styles.keys()) if styles else []
-    for style in style_names:
+    for style in list(gen_cfg.styles.keys()):
         for strength in [0.3, 0.7]:
             styled = generator.apply_batch(
                 images_np, style, strength, batch_size=num_vis
@@ -898,104 +811,31 @@ def visualize_domain(
             )
 
 
-def generate_ood_dataset(
-    dataset_name: str,
-    root: str = "./data",
-    num_samples: int = 1000,
-    seed: int = 42,
-    force: bool = False,
-    batch_size: int = 16,
-    model_path: Optional[str] = None,
-    prompts: Optional[list] = None,
-    use_turbo: bool = False,
-    turbo_steps: int = 1,
-) -> Path:
-    """预生成 OOD 数据集 (外层接口)"""
-    if dataset_name not in DATASET_REGISTRY:
-        raise ValueError(f"未知数据集: {dataset_name}")
-
-    DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
-
-    if _check_existing_dataset(output_dir, force):
-        return output_dir
-
-    mode_str = "SDXL Turbo" if use_turbo else "SD 2.1"
-    get_logger().info(f"🔧 生成 OOD: {DatasetClass.NAME} ({num_samples} 张, {mode_str})")
-
-    num_gpus = torch.cuda.device_count()
-    if num_gpus <= 1:
-        _run_ood_serial(
-            output_dir, num_samples, DatasetClass.IMAGE_SIZE, batch_size,
-            seed, model_path, prompts, use_turbo, turbo_steps, num_gpus
-        )
-    else:
-        _run_ood_parallel(
-            output_dir, num_samples, DatasetClass.IMAGE_SIZE, batch_size,
-            seed, model_path, prompts, use_turbo, turbo_steps
-        )
-
-    get_logger().info(f"✅ {DatasetClass.NAME}-OOD 生成完成!")
-    return output_dir
-
-
-def _run_ood_serial(output_dir, n, size, bs, seed, model_path, prompts, turbo, steps, num_gpus):
-    """单卡或 CPU OOD 生成"""
-    device = "cuda:0" if num_gpus == 1 else "cpu"
-    if turbo:
-        generator = TurboOODGenerator(device=device, model_path=model_path, prompts=prompts, num_steps=steps)
-    else:
-        generator = OODGenerator(device=device, model_path=model_path, prompts=prompts)
-
-    imgs = generator.generate_batch(num_samples=n, target_size=size, batch_size=bs, seed=seed)
-    np.save(str(output_dir / "images.npy"), imgs)
-
-
-def _run_ood_parallel(output_dir, n, size, bs, seed, model_path, prompts, turbo, steps):
-    """多卡并行 OOD 生成"""
-    import multiprocessing
-    num_gpus = torch.cuda.device_count()
-    samples_per_gpu = n // num_gpus
-    q = multiprocessing.Queue()
-    processes = []
-
-    for i in range(num_gpus):
-        gpu_n = samples_per_gpu + (n % num_gpus if i == num_gpus - 1 else 0)
-        p = multiprocessing.Process(
-            target=_worker_ood_gpu,
-            args=(i, gpu_n, size, bs, seed, q, model_path, prompts, turbo, steps)
-        )
-        p.start()
-        processes.append(p)
-
-    all_imgs = [q.get() for _ in range(num_gpus)]
-    for p in processes: p.join()
-    np.save(str(output_dir / "images.npy"), np.concatenate(all_imgs, axis=0))
-
-    # =============================================================================
-    # CLI 入口
-    # =============================================================================
+# =============================================================================
+# CLI 入口
+# =============================================================================
 
 
 def main():
-    """CLI 入口 - 重构为大纲结构"""
+    """CLI 入口"""
     args = _parse_args()
     config = _load_config()
-    params = _get_gen_params(args, config)
+    _execute_generation(args, config)
 
-    # 1. 执行生成
-    _execute_generation(args, config, params)
-
-    # 2. 统一可视化 (如果启用)
     if config.generation.visualize:
-        _execute_visualization(args, config, params)
+        _execute_visualization(args, config)
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="项目鲁棒性数据生成器")
-    parser.add_argument("--type", type=str, required=True, choices=["corruption", "domain", "ood"])
-    parser.add_argument("--dataset", type=str, required=True, choices=list(DATASET_REGISTRY.keys()))
-    parser.add_argument("--model", type=str, choices=["sd", "turbo"], help="sd (SD 2.1) | turbo (SDXL Turbo)")
+    parser = argparse.ArgumentParser(
+        description="项目鲁棒性数据生成器 (SDXL Lightning)"
+    )
+    parser.add_argument(
+        "--type", type=str, required=True, choices=["corruption", "domain", "ood"]
+    )
+    parser.add_argument(
+        "--dataset", type=str, required=True, choices=list(DATASET_REGISTRY.keys())
+    )
     parser.add_argument("--force", action="store_true", help="忽略缓存强制生成")
     return parser.parse_args()
 
@@ -1006,46 +846,118 @@ def _load_config():
     return config
 
 
-def _get_gen_params(args, config):
-    gen_cfg = config.generation
-    use_turbo = (args.model == "turbo") if args.model else gen_cfg.use_turbo
-    
-    return {
-        "use_turbo": use_turbo,
-        "model_path": gen_cfg.turbo_model_path if use_turbo else gen_cfg.model_path,
-        "turbo_steps": gen_cfg.turbo_steps if use_turbo else 1,
-        "batch_size": gen_cfg.batch_size,
-        "samples_per_group": gen_cfg.samples_per_group,
-        "seed": config.seed,
-        "root": config.data_root
-    }
-
-
-def _execute_generation(args, config, p):
+def _execute_generation(args, config):
     gen_cfg = config.generation
     if args.type == "corruption":
-        generate_corruption_dataset(args.dataset, p["root"], p["seed"], args.force)
+        generate_corruption_dataset(
+            args.dataset, config.data_root, config.seed, args.force
+        )
     elif args.type == "domain":
         generate_domain_dataset(
-            args.dataset, p["root"], p["samples_per_group"], p["seed"], args.force,
-            p["batch_size"], p["model_path"], gen_cfg.styles, gen_cfg.strengths,
-            p["use_turbo"], p["turbo_steps"]
+            args.dataset,
+            config.data_root,
+            gen_cfg.samples_per_group,
+            config.seed,
+            args.force,
+            gen_cfg.batch_size,
+            gen_cfg.base_model,
+            gen_cfg.lightning_repo,
+            gen_cfg.lightning_ckpt,
+            gen_cfg.styles,
+            gen_cfg.strengths,
+            gen_cfg.num_steps,
         )
     elif args.type == "ood":
         generate_ood_dataset(
-            args.dataset, p["root"], p["samples_per_group"] * 2, p["seed"], args.force,
-            p["batch_size"], p["model_path"], gen_cfg.ood_prompts,
-            p["use_turbo"], p["turbo_steps"]
+            args.dataset,
+            config.data_root,
+            gen_cfg.samples_per_group * 2,
+            config.seed,
+            args.force,
+            gen_cfg.batch_size,
+            gen_cfg.base_model,
+            gen_cfg.lightning_repo,
+            gen_cfg.lightning_ckpt,
+            gen_cfg.ood_prompts,
+            gen_cfg.num_steps,
         )
 
 
-def _execute_visualization(args, config, p):
+def _execute_visualization(args, config):
     if args.type == "corruption":
-        visualize_corruption(args.dataset, p["root"], config.generation.num_vis)
+        visualize_corruption(args.dataset, config.data_root, config.generation.num_vis)
     elif args.type == "domain":
-        visualize_domain(args.dataset, p["root"], config.generation.num_vis, p["seed"], p["model_path"], config.generation.styles)
+        visualize_domain(
+            args.dataset, config.data_root, config.generation.num_vis, config.generation
+        )
     elif args.type == "ood":
-        get_logger().info("ℹ️ OOD 模式暂不支持原图对比")
+        visualize_ood(args.dataset, config.data_root, config.generation.num_vis)
+
+
+def save_visual_grid(
+    images: np.ndarray,
+    output_path: Path,
+    title: str,
+    num_samples: int = 8,
+    nrow: int = 4,
+):
+    """保存单组图像的网格"""
+    n = min(len(images), num_samples)
+    if n == 0:
+        return
+
+    # Randomly select n images if we have more than n
+    if len(images) > n:
+        indices = np.linspace(0, len(images) - 1, n, dtype=int)
+        imgs = images[indices]
+    else:
+        imgs = images
+
+    h, w = imgs.shape[1:3]
+    ncols = (n + nrow - 1) // nrow
+
+    grid = Image.new("RGB", (w * nrow, h * ncols))
+
+    for i, img in enumerate(imgs):
+        r = i // nrow
+        c = i % nrow
+        grid.paste(Image.fromarray(img.astype(np.uint8)), (c * w, r * h))
+
+    ensure_dir(output_path.parent)
+    grid.save(str(output_path))
+    get_logger().info(f"📊 可视化保存: {output_path}")
+
+
+def visualize_ood(dataset_name: str, root: str = "./data", num_vis: int = 8):
+    """为 OOD 生成可视化网格"""
+    DatasetClass = DATASET_REGISTRY[dataset_name]
+    output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
+    vis_dir = output_dir / "visuals"
+    ensure_dir(vis_dir)
+
+    images_path = output_dir / "images.npy"
+    if not images_path.exists():
+        get_logger().warning(f"⚠️ OOD 数据未找到: {images_path}")
+        return
+
+    get_logger().info("🎨 正在生成 OOD 可视化...")
+
+    # Load images (using mmap to avoid loading everything if large)
+    images = np.load(str(images_path), mmap_mode="r")
+
+    # Take a subset for visualization
+    total_images = len(images)
+    indices = np.linspace(0, total_images - 1, min(total_images, num_vis), dtype=int)
+    vis_images = images[indices]
+
+    save_visual_grid(
+        vis_images,
+        vis_dir / "ood_samples.png",
+        "OOD Samples",
+        num_samples=num_vis,
+        nrow=4,
+    )
+
 
 if __name__ == "__main__":
     main()

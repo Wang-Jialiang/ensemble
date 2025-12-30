@@ -11,9 +11,10 @@
     from ensemble.config import Config, Experiment
 """
 
-from .core import Config, Experiment
+from .core import Config, Experiment, GenerationConfig
 
 __all__ = [
     "Config",
     "Experiment",
+    "GenerationConfig",
 ]

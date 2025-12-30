@@ -5,48 +5,30 @@
 """
 
 import datetime
-import json
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import List, Optional
 
 import torch
 
-from ..utils import ensure_dir, get_logger
+from ..utils import ensure_dir
 
 
 @dataclass
 class GenerationConfig:
-    """数据生成配置 (Corruption / Domain / OOD)"""
+    """数据生成配置 (Corruption / Domain / OOD) - SDXL Lightning"""
 
-    model_path: str = "stabilityai/stable-diffusion-2-1"
-    batch_size: int = 16
+    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0"  # SDXL 基础模型
+    lightning_repo: str = "ByteDance/SDXL-Lightning"  # Lightning UNet 仓库
+    lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors"  # 4-step 检查点
+    num_steps: int = 4  # 推理步数 (2/4/8)
+    batch_size: int = 24  # A6000 推荐
     samples_per_group: int = 1000
     visualize: bool = True
     num_vis: int = 10
-    styles: dict = field(
-        default_factory=lambda: {
-            "sketch": "pencil sketch drawing",
-            "painting": "oil painting artwork",
-            "cartoon": "cartoon illustration style",
-            "watercolor": "watercolor painting art",
-        }
-    )
-    strengths: List[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
-    ood_prompts: List[str] = field(
-        default_factory=lambda: [
-            "abstract colorful geometric patterns",
-            "underwater coral reef with tropical fish",
-            "close-up of delicious food dishes",
-            "city street at night with neon lights",
-            "cartoon character illustration",
-            "ancient stone ruins in jungle",
-            "microscopic view of cells",
-            "aurora borealis in night sky",
-            "vintage book pages with text",
-            "crystal formations in cave",
-        ]
-    )
+    styles: dict = field(default_factory=dict)  # 由 default.yaml 填充
+    strengths: List[float] = field(default_factory=list)  # 由 default.yaml 填充
+    ood_prompts: List[str] = field(default_factory=list)  # 由 default.yaml 填充
 
 
 @dataclass
@@ -219,53 +201,54 @@ class Config:
     def load_yaml(cls, yaml_path: str) -> tuple["Config", List["Experiment"], list]:
         """加载层级配置: constants -> base -> generation"""
         import yaml
+
         with open(yaml_path, "r", encoding="utf-8") as f:
             d = yaml.safe_load(f) or {}
 
         # 核心合并逻辑: Base 覆盖 Constants
         merged = {**d.get("constants", {}), **d.get("base", {})}
         cfg = cls(**merged)
-        
+
         # 处理子配置与嵌套列表
-        if "generation" in d: cfg.generation = GenerationConfig(**d["generation"])
+        if "generation" in d:
+            cfg.generation = GenerationConfig(**d["generation"])
         exps = [Experiment(**e) for e in d.get("experiments", [])]
         return cfg, exps, d.get("eval_checkpoints", [])
 
     def __post_init__(self) -> None:
         """配置校验与派生字段注入"""
-        self._validate_params()
         self._setup_hardware()
         self._auto_configure_for_dataset()
-        
+
         # 自动生成实验目录
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.save_dir = str(Path(self.save_root) / f"{self.experiment_name or 'exp'}_{ts}")
+        self.save_dir = str(
+            Path(self.save_root) / f"{self.experiment_name or 'exp'}_{ts}"
+        )
         ensure_dir(self.save_dir)
-
-    def _validate_params(self):
-        """严格的生产级校验"""
-        assert 0 < self.val_split < 1, "val_split 必须在 (0, 1) 之间"
-        assert self.batch_size > 0, "batch_size 必须为正整数"
-        assert self.lr > 0, "学习率必须为正"
 
     def _setup_hardware(self):
         """硬件资源探测"""
         self.gpu_ids = list(range(torch.cuda.device_count()))
-        if not self.gpu_ids: raise RuntimeError("❌ No GPU found")
+        if not self.gpu_ids:
+            raise RuntimeError("❌ No GPU found")
 
     def _auto_configure_for_dataset(self) -> None:
         """数据集注入 (耦合隔离版)"""
         from ..datasets import DATASET_REGISTRY
+
         name = self.dataset_name.lower()
-        if name not in DATASET_REGISTRY: raise ValueError(f"Unsupported: {name}")
+        if name not in DATASET_REGISTRY:
+            raise ValueError(f"Unsupported: {name}")
 
         ds = DATASET_REGISTRY[name]
         self.num_classes, self.image_size = ds.NUM_CLASSES, ds.IMAGE_SIZE
         self.dataset_mean, self.dataset_std = ds.MEAN, ds.STD
-        
+
         # 按需覆盖数据集定义的特殊参数
         for k, v in getattr(ds, "CONFIG_OVERRIDES", {}).items():
-            if hasattr(self, k): setattr(self, k, v)
+            if hasattr(self, k):
+                setattr(self, k, v)
 
 
 @dataclass

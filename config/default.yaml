@@ -185,14 +185,14 @@ eval_checkpoints:
 # 数据生成配置 (generate.py 使用)
 # ==============================================================================
 generation:
-  model_path: "stabilityai/stable-diffusion-2-1"  # SD 模型路径 (本地或 HF ID)
-  turbo_model_path: "stabilityai/sdxl-turbo"      # SDXL Turbo 模型路径 (极速模式)
-  use_turbo: false                                # 是否默认使用 Turbo 模式
-  turbo_steps: 1                                  # Turbo 推理步数 (1-4)
-  batch_size: 16                                 # 推理 Batch Size
-  samples_per_group: 1000                        # 每组样本数 (Domain/OOD)
-  visualize: true                                # 是否生成可视化对比图
-  num_vis: 10                                    # 每个类别/风格可视化的样本数
+  base_model: "./models/sdxl-base-1.0"  # SDXL 基础模型
+  lightning_repo: "./models/SDXL-Lightning"              # Lightning UNet 仓库
+  lightning_ckpt: "sdxl_lightning_4step_unet.safetensors"  # 4-step UNet 检查点
+  num_steps: 4                                             # 推理步数 (2/4/8)
+  batch_size: 24                                           # A6000 48GB 推荐
+  samples_per_group: 1000                                  # 每组样本数 (Domain/OOD)
+  visualize: true                                          # 是否生成可视化对比图
+  num_vis: 10                                              # 每个类别/风格可视化的样本数
 
   # Domain Shift 风格与提示词
   styles:

@@ -92,11 +92,13 @@ class CorruptionDataset:
     def __init__(self, dataset_name: str, root: str = "./data"):
         """Corruption 数据集构造函数"""
         if dataset_name not in DATASET_REGISTRY:
-            raise ValueError(f"未知数据集: {dataset_name}. 可用: {list(DATASET_REGISTRY.keys())}")
+            raise ValueError(
+                f"未知数据集: {dataset_name}. 可用: {list(DATASET_REGISTRY.keys())}"
+            )
 
         DatasetClass = DATASET_REGISTRY[dataset_name]
         self.data_dir = Path(root) / f"{DatasetClass.NAME}-C"
-        
+
         # 1. 基础初始化
         self._verify_installation(dataset_name)
         self._init_statistics(DatasetClass)
@@ -121,7 +123,9 @@ class CorruptionDataset:
         labels_path = self.data_dir / "labels.npy"
         self.labels = torch.from_numpy(np.load(str(labels_path))).long()
 
-    def get_loader(self, corruption_type: str, severity: int, config: "Config") -> DataLoader:
+    def get_loader(
+        self, corruption_type: str, severity: int, config: "Config"
+    ) -> DataLoader:
         """获取特定损坏类型和严重程度的数据加载器"""
         # 1. 解析目标类型
         target_types = self._resolve_types(corruption_type)
@@ -130,16 +134,12 @@ class CorruptionDataset:
         all_data, all_labels = [], []
         for c_type in target_types:
             data = self._load_corruption(c_type, severity)
-            # 自动适配变长标签 (如果生成时抽样了)
-            current_n = data.size(0)
             all_data.append(data)
-            all_labels.append(self.labels[:current_n])
+            all_labels.append(self.labels)
 
         # 3. 组装 DataLoader
         return self._prepare_dataloader(
-            torch.cat(all_data, dim=0),
-            torch.cat(all_labels, dim=0),
-            config
+            torch.cat(all_data, dim=0), torch.cat(all_labels, dim=0), config
         )
 
     def _resolve_types(self, corruption_type: str) -> list:
@@ -165,7 +165,7 @@ class CorruptionDataset:
         """从预生成文件加载单个 corruption 类型的数据"""
         # 1. 读取对应严重程度的数据切片
         images_np = self._read_npy_slice(corruption_type, severity)
-        
+
         # 2. 转换为标准化的 Tensor
         return self._postprocess_tensor(images_np)
 
@@ -179,12 +179,12 @@ class CorruptionDataset:
             raise FileNotFoundError(f"未找到 corruption 文件: {file_path}")
 
         data = np.load(str(file_path))
-        
+
         # 计算切片索引 (假设数据按 severity 排序堆叠)
         total_records = data.shape[0]
         n_sev = len(self.SEVERITIES)
         n_samples = total_records // n_sev
-        
+
         if total_records % n_sev != 0:
             raise ValueError(f"数据格式错误: {total_records} 无法被 {n_sev} 整除")
 
@@ -197,5 +197,3 @@ class CorruptionDataset:
         # [N, H, W, 3] -> [N, 3, H, W]
         images_tensor = torch.from_numpy(images_np).permute(0, 3, 1, 2).float() / 255.0
         return (images_tensor - self.mean) / self.std
-
-    # 需要修改 get_loader 来适配变长 labels

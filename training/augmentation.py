@@ -29,7 +29,7 @@ class CloudMaskGenerator:
         persistence: float,
         octaves_large: int,
         octaves_small: int,
-        scale_ratio: float = 0.3,
+        scale_ratio: float,
     ):
         self.h = height
         self.w = width
@@ -40,13 +40,15 @@ class CloudMaskGenerator:
         # base_scale 随图像尺寸动态调整，使用 scale_ratio 控制碎裂程度
         self.base_scale = min(height, width) * scale_ratio
 
-    def generate_batch(self, num_masks: int, target_ratio: float = 0.3) -> List[torch.Tensor]:
+    def generate_batch(
+        self, num_masks: int, target_ratio: float = 0.3
+    ) -> List[torch.Tensor]:
         """批量产生 Perlin 噪声掩码包"""
         masks = []
         for _ in range(num_masks):
             # 1. 执行具体的噪声生成
             noise = self._get_noise_map()
-            
+
             # 2. 基于分位数执行掩码量化
             masks.append(self._threshold_noise(noise, target_ratio))
         return masks
@@ -202,7 +204,9 @@ class CutoutAugmentation(AugmentationMethod):
             self._model_seeds[model_idx] = base + model_idx * 10000
         self.model_pools_initialized = True
 
-    def apply(self, images, targets, ratio, prob, model_index=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def apply(
+        self, images, targets, ratio, prob, model_index=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """应用 Cutout 增强 (主流程)"""
         if random.random() > prob:
             return images, targets
@@ -218,14 +222,17 @@ class CutoutAugmentation(AugmentationMethod):
         """确定遮挡的具体坐标"""
         B, _, H, W = images.shape
         size = int(H * np.sqrt(ratio))
-        
+
         # 确定随机数生成器
         if model_idx is not None and self.model_pools_initialized:
             rng = random.Random(self._model_seeds[model_idx])
             y, x = rng.randint(0, max(0, H - size)), rng.randint(0, max(0, W - size))
         else:
-            y, x = random.randint(0, max(0, H - size)), random.randint(0, max(0, W - size))
-            
+            y, x = (
+                random.randint(0, max(0, H - size)),
+                random.randint(0, max(0, W - size)),
+            )
+
         return y, x, size
 
     def _fill_cutout(self, images, y, x, size):
@@ -266,7 +273,9 @@ class PixelHaSAugmentation(AugmentationMethod):
             self._model_seeds[model_idx] = base + model_idx * 10000
         self.model_pools_initialized = True
 
-    def apply(self, images, targets, ratio, prob, model_index=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def apply(
+        self, images, targets, ratio, prob, model_index=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """应用像素级 HaS 增强"""
         if random.random() > prob:
             return images, targets
@@ -281,9 +290,11 @@ class PixelHaSAugmentation(AugmentationMethod):
     def _generate_selection_mask(self, shape, ratio, model_idx):
         """生成 0-1 掩码张量"""
         if model_idx is not None and self.model_pools_initialized:
-            gen = torch.Generator(device=self.device).manual_seed(self._model_seeds[model_idx])
+            gen = torch.Generator(device=self.device).manual_seed(
+                self._model_seeds[model_idx]
+            )
             return torch.rand(shape, device=self.device, generator=gen) > ratio
-        
+
         return torch.rand(shape, device=self.device) > ratio
 
 
@@ -302,7 +313,13 @@ class GridMaskAugmentation(AugmentationMethod):
     参考: GridMask Data Augmentation (Chen et al., 2020)
     """
 
-    def __init__(self, device: torch.device, d_ratio_min: float = 0.1, d_ratio_max: float = 0.3, fill_value: float = 0.0):
+    def __init__(
+        self,
+        device: torch.device,
+        d_ratio_min: float = 0.1,
+        d_ratio_max: float = 0.3,
+        fill_value: float = 0.0,
+    ):
         super().__init__(device)
         self.d_ratio_min = d_ratio_min
         self.d_ratio_max = d_ratio_max
@@ -313,7 +330,12 @@ class GridMaskAugmentation(AugmentationMethod):
     def from_config(cls, device, cfg):
         mean, std = np.mean(cfg.dataset_mean), np.mean(cfg.dataset_std)
         fill_value = (0.0 - mean) / std
-        return cls(device, d_ratio_min=cfg.gridmask_d_ratio_min, d_ratio_max=cfg.gridmask_d_ratio_max, fill_value=fill_value)
+        return cls(
+            device,
+            d_ratio_min=cfg.gridmask_d_ratio_min,
+            d_ratio_max=cfg.gridmask_d_ratio_max,
+            fill_value=fill_value,
+        )
 
     def init_model_seeds(self, num_models: int, base_seed: int = None):
         """初始化模型级固定 seed"""
@@ -322,7 +344,9 @@ class GridMaskAugmentation(AugmentationMethod):
             self._model_seeds[model_idx] = base + model_idx * 10000
         self.model_pools_initialized = True
 
-    def apply(self, images, targets, ratio, prob, model_index=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def apply(
+        self, images, targets, ratio, prob, model_index=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """应用 GridMask 增强 (主流程)"""
         if random.random() > prob:
             return images, targets
@@ -335,10 +359,10 @@ class GridMaskAugmentation(AugmentationMethod):
         """处理批次图像的网格遮挡"""
         B, C, H, W = images.shape
         augmented = images.clone()
-        
+
         # 模式判定
         is_model_level = model_idx is not None and self.model_pools_initialized
-        
+
         if is_model_level:
             # 模型级: 整个 Batch 使用同一个固定网格
             mask = self._get_single_mask(H, W, ratio, self._model_seeds[model_idx])
@@ -349,16 +373,19 @@ class GridMaskAugmentation(AugmentationMethod):
             for b in range(B):
                 mask = self._get_single_mask(H, W, ratio, seed=None)
                 augmented[b] = images[b] * mask + (1 - mask) * self._fill_value
-                
+
         return augmented
 
     def _get_single_mask(self, H, W, ratio, seed=None):
         """生成单张网格 Mask"""
         rng = random.Random(seed) if seed is not None else random
-        
+
         # 1. 计算网格参数
         min_dim = min(H, W)
-        d = rng.randint(max(4, int(min_dim * self.d_ratio_min)), max(8, int(min_dim * self.d_ratio_max)))
+        d = rng.randint(
+            max(4, int(min_dim * self.d_ratio_min)),
+            max(8, int(min_dim * self.d_ratio_max)),
+        )
         off_x, off_y = rng.randint(0, d - 1), rng.randint(0, d - 1)
         block_len = int(d * np.sqrt(ratio))
 
@@ -382,10 +409,29 @@ class PerlinMaskAugmentation(AugmentationMethod):
     - 模型级: 每个模型拥有固定 seed，动态生成 mask（ratio 可变）
     """
 
-    def __init__(self, device: torch.device, height: int, width: int, pool_size: int = 100, persistence: float = 0.5, octaves_large: int = 4, octaves_small: int = 3, scale_ratio: float = 0.3, fill_value: float = 0.0):
+    def __init__(
+        self,
+        device: torch.device,
+        height: int,
+        width: int,
+        pool_size: int = 100,
+        persistence: float = 0.5,
+        octaves_large: int = 4,
+        octaves_small: int = 3,
+        scale_ratio: float = 0.3,
+        fill_value: float = 0.0,
+    ):
         super().__init__(device)
         self.height, self.width = height, width
-        self.mask_generator = CloudMaskGenerator(height, width, device, persistence, octaves_large, octaves_small, scale_ratio)
+        self.mask_generator = CloudMaskGenerator(
+            height,
+            width,
+            device,
+            persistence,
+            octaves_large,
+            octaves_small,
+            scale_ratio,
+        )
         self._fill_value = fill_value
         self._masks = []  # 样本级共享池
         self._pool_size = pool_size
@@ -395,9 +441,17 @@ class PerlinMaskAugmentation(AugmentationMethod):
     def from_config(cls, device, cfg):
         mean, std = np.mean(cfg.dataset_mean), np.mean(cfg.dataset_std)
         fill_value = (0.0 - mean) / std
-        return cls(device, cfg.image_size, cfg.image_size, cfg.mask_pool_size,
-                   persistence=cfg.perlin_persistence, octaves_large=cfg.perlin_octaves_large,
-                   octaves_small=cfg.perlin_octaves_small, scale_ratio=cfg.perlin_scale_ratio, fill_value=fill_value)
+        return cls(
+            device,
+            cfg.image_size,
+            cfg.image_size,
+            cfg.mask_pool_size,
+            persistence=cfg.perlin_persistence,
+            octaves_large=cfg.perlin_octaves_large,
+            octaves_small=cfg.perlin_octaves_small,
+            scale_ratio=cfg.perlin_scale_ratio,
+            fill_value=fill_value,
+        )
 
     def precompute_masks(self, target_ratio: float):
         """预计算样本级共享 mask 池"""
@@ -410,7 +464,9 @@ class PerlinMaskAugmentation(AugmentationMethod):
             self._model_seeds[model_idx] = base + model_idx * 10000
         self.model_pools_initialized = True
 
-    def apply(self, images, targets, ratio, prob, model_index=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def apply(
+        self, images, targets, ratio, prob, model_index=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """应用 Perlin 噪声增强 (主流程)"""
         if random.random() > prob:
             return images, targets
@@ -423,7 +479,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
         """执行具体的 Perlin 掩码应用"""
         B, C, H, W = images.shape
         augmented = images.clone()
-        
+
         if model_idx is not None and self.model_pools_initialized:
             # 模型级: 动态生成单个固定 Mask
             mask = self._generate_managed_mask(self._model_seeds[model_idx], ratio)
@@ -432,21 +488,30 @@ class PerlinMaskAugmentation(AugmentationMethod):
                 augmented[b] = images[b] * mask_v + (1 - mask_v) * self._fill_value
         else:
             # 样本级: 从池中抽样
-            if not self._masks: raise RuntimeError("PerlinMask: call precompute_masks() first")
+            if not self._masks:
+                raise RuntimeError("PerlinMask: call precompute_masks() first")
             for b in range(B):
                 m = random.choice(self._masks).expand(-1, C, -1, -1).squeeze(0)
                 augmented[b] = images[b] * m + (1 - m) * self._fill_value
-                
+
         return augmented
 
     def _generate_managed_mask(self, seed: int, ratio: float) -> torch.Tensor:
         """安全地使用特定 seed 生成 Mask 并恢复状态"""
-        t_state, n_state, p_state = torch.get_rng_state(), np.random.get_state(), random.getstate()
-        
-        torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+        t_state, n_state, p_state = (
+            torch.get_rng_state(),
+            np.random.get_state(),
+            random.getstate(),
+        )
+
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
         mask = self.mask_generator.generate_batch(1, ratio)[0]
-        
-        torch.set_rng_state(t_state); np.random.set_state(n_state); random.setstate(p_state)
+
+        torch.set_rng_state(t_state)
+        np.random.set_state(n_state)
+        random.setstate(p_state)
         return mask
 
 

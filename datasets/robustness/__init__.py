@@ -23,7 +23,7 @@ from .corruption import (
     SEVERITIES,
     CorruptionDataset,
 )
-from .domain import DomainShiftDataset
+from .domain import DOMAIN_STRENGTHS, DOMAIN_STYLES, DomainShiftDataset
 from .ood import OODDataset
 
 __all__ = [
@@ -34,6 +34,8 @@ __all__ = [
     "CorruptionDataset",
     # Domain
     "DomainShiftDataset",
+    "DOMAIN_STYLES",
+    "DOMAIN_STRENGTHS",
     # OOD
     "OODDataset",
 ]
