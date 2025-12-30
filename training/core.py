@@ -30,83 +30,78 @@ from .worker import GPUWorker, HistorySaver
 
 
 class CheckpointMixin:
-    """检查点管理 Mixin
-
-    提供 checkpoint 保存、加载、清理功能。
-    需要子类提供: cfg, name, workers, history, best_val_loss, best_epoch,
-                  early_stopping, total_training_time, augmentation_method,
-                  use_curriculum, fixed_ratio, fixed_prob, logger
-    """
+    """检查点管理 Mixin (大纲化)"""
 
     def _save_checkpoint(self, tag: str):
-        """保存checkpoint"""
-        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
-        ensure_dir(checkpoint_dir)
+        """保存当前训练状态与模型权重"""
+        path = self._get_checkpoint_dir(tag)
+        ensure_dir(path)
 
+        # 1. 保存各 Worker 的模型
         for worker in self.workers:
-            worker.save_models(str(checkpoint_dir), self.name)
+            worker.save_models(str(path), self.name)
 
-        state = {
-            "epoch": len(self.history["epoch"]),
-            "best_val_loss": self.best_val_loss,
-            "best_epoch": self.best_epoch,
-            "history": self.history,
-            "early_stopping_counter": self.early_stopping.counter,
-            "total_training_time": self.total_training_time,
-            "augmentation_method": self.augmentation_method,
-            "use_curriculum": self.use_curriculum,
-            "fixed_ratio": self.fixed_ratio,
-            "fixed_prob": self.fixed_prob,
-        }
-        torch.save(state, checkpoint_dir / "trainer_state.pth")
-        self.logger.info(f"💾 Saved checkpoint: {tag}")
+        # 2. 保存 Trainer 状态快照
+        self._write_state_file(path)
+        self.logger.info(f"💾 Checkpoint Saved: {tag}")
 
     def load_checkpoint(self, tag: str = "best") -> bool:
-        """加载checkpoint"""
-        checkpoint_dir = Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
-        if not checkpoint_dir.exists():
-            self.logger.warning(f"⚠️ Checkpoint not found: {checkpoint_dir}")
+        """从指定 tag 加载检查点"""
+        path = self._get_checkpoint_dir(tag)
+        if not path.exists():
+            self.logger.warning(f"⚠️ Checkpoint 不存在: {path}")
             return False
 
+        # 1. 加载模型
         for worker in self.workers:
-            worker.load_models(str(checkpoint_dir), self.name)
+            worker.load_models(str(path), self.name)
 
-        state_path = checkpoint_dir / "trainer_state.pth"
-        if state_path.exists():
-            state = torch.load(state_path, weights_only=False)
-            self.best_val_loss = state["best_val_loss"]
-            self.best_epoch = state["best_epoch"]
-            self.history = state["history"]
-            self.early_stopping.counter = state.get("early_stopping_counter", 0)
-            self.total_training_time = state.get("total_training_time", 0.0)
-            self.augmentation_method = state.get(
-                "augmentation_method", self.augmentation_method
-            )
-            self.use_curriculum = state.get("use_curriculum", self.use_curriculum)
-            self.fixed_ratio = state.get("fixed_ratio", self.fixed_ratio)
-            self.fixed_prob = state.get("fixed_prob", self.fixed_prob)
-            self.logger.info(f"✅ Loaded checkpoint: {tag}")
-            self.logger.info(
-                f"   Augmentation: {self.augmentation_method}, Curriculum: {self.use_curriculum}"
-            )
-            return True
-        return False
+        # 2. 恢复状态变量
+        self._read_state_file(path)
+        return True
+
+    def _get_checkpoint_dir(self, tag: str) -> Path:
+        """统一路径生成逻辑"""
+        return Path(self.cfg.save_dir) / "checkpoints" / self.name / tag
+
+    def _write_state_file(self, path: Path):
+        """写入 trainer 状态二进制文件"""
+        state = {
+            "epoch": len(self.history["epoch"]),
+            "best_val_loss": self._best_val_loss,
+            "best_epoch": self._best_epoch,
+            "history": self.history,
+            "early_stopping_counter": self.early_stopping.counter,
+            "total_time": self.total_training_time,
+            "aug_method": self.augmentation_method,
+            "params": (self.use_curriculum, self.fixed_ratio, self.fixed_prob)
+        }
+        torch.save(state, path / "trainer_state.pth")
+
+    def _read_state_file(self, path: Path):
+        """解析并恢复状态"""
+        file = path / "trainer_state.pth"
+        if not file.exists(): return
+        
+        s = torch.load(file, weights_only=False)
+        self._best_val_loss, self._best_epoch = s["best_val_loss"], s["best_epoch"]
+        self.history = s["history"]
+        self.early_stopping.counter = s.get("early_stopping_counter", 0)
+        self.total_training_time = s.get("total_time", 0.0)
+        self.logger.info(f"✅ State Restored (Best Loss: {self._best_val_loss:.4f})")
 
     def _cleanup_old_checkpoints(self):
-        """清理旧checkpoint"""
-        checkpoint_base = Path(self.cfg.save_dir) / "checkpoints" / self.name
-        if not checkpoint_base.exists():
-            return
+        """清理冗余的周期性检查点"""
+        base = Path(self.cfg.save_dir) / "checkpoints" / self.name
+        if not base.exists(): return
 
-        epoch_dirs = [
-            d for d in checkpoint_base.iterdir() if d.name.startswith("epoch_")
-        ]
-        epoch_dirs.sort(key=lambda x: int(x.name.split("_")[1]))
+        dirs = sorted([d for d in base.iterdir() if d.name.startswith("epoch_")], 
+                      key=lambda x: int(x.name.split("_")[1]))
 
-        if len(epoch_dirs) > self.cfg.keep_last_n_checkpoints:
-            for old_dir in epoch_dirs[: -self.cfg.keep_last_n_checkpoints]:
-                shutil.rmtree(old_dir)
-                self.logger.info(f"🗑️ Removed old checkpoint: {old_dir.name}")
+        if len(dirs) > self.cfg.keep_last_n_checkpoints:
+            for d in dirs[:-self.cfg.keep_last_n_checkpoints]:
+                shutil.rmtree(d)
+                self.logger.info(f"🗑️ Cleaned: {d.name}")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -126,82 +121,52 @@ class StagedEnsembleTrainer(CheckpointMixin):
         3. Finetune阶段: 固定遮挡比例微调，稳定模型性能
     """
 
-    def __init__(
-        self,
-        method_name: str,
-        cfg: Config,
-        augmentation_method: str = "perlin",
-        use_curriculum: bool = True,
-        fixed_ratio: float = 0.25,
-        fixed_prob: float = 0.5,
-        share_warmup_backbone: bool = False,
-    ):
+    def __init__(self, method_name, cfg, augmentation_method="perlin", use_curriculum=True, fixed_ratio=0.25, fixed_prob=0.5, share_warmup_backbone=False):
+        """三阶段集成训练器构造函数 (大纲化)"""
         self.name = method_name
         self.cfg = cfg
         self.total_training_time = 0.0
 
-        # 增强配置
+        # 1. 初始化属性与增强策略
         self.augmentation_method = augmentation_method
         self.use_curriculum = use_curriculum
-        self.fixed_ratio = fixed_ratio
-        self.fixed_prob = fixed_prob
+        self.fixed_ratio, self.fixed_prob = fixed_ratio, fixed_prob
         self.share_warmup_backbone = share_warmup_backbone
 
-        # 性能优化设置
-        if cfg.use_tf32:
+        # 2. 硬件与日志初始化
+        self._init_hardware_optimizations()
+        self.setup_logging()
+        self._init_monitoring_tools()
+
+        # 3. 初始化工作节点 (Parallel Workers)
+        self.workers: List[GPUWorker] = [
+            GPUWorker(gid, cfg.num_models_per_gpu, cfg, augmentation_method) for gid in cfg.gpu_ids
+        ]
+
+        # 4. 初始化状态跟踪变量
+        self._init_tracking_structures()
+        cfg.save()  # 持久化当前运行配置
+
+    def _init_hardware_optimizations(self):
+        """配置 Cuda 后端加速选项"""
+        if self.cfg.use_tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
 
-        get_logger().info(f"\n🚀 Initializing {method_name}")
-        get_logger().info(f"   Augmentation: {augmentation_method}")
-        get_logger().info(f"   Curriculum: {'Yes' if use_curriculum else 'No'}")
-        get_logger().info(
-            f"   Config: {cfg.total_models} {cfg.model_name} models across {len(cfg.gpu_ids)} GPUs"
-        )
-
-        # 创建Workers
-        self.workers: List[GPUWorker] = []
-        for gpu_id in cfg.gpu_ids:
-            worker = GPUWorker(gpu_id, cfg.num_models_per_gpu, cfg, augmentation_method)
-            self.workers.append(worker)
-
-        # 日志系统
-        self.setup_logging()
-
-        # TensorBoard
+    def _init_monitoring_tools(self):
+        """初始化 TensorBoard 与其它观测工具"""
         self.writer = None
-        if cfg.use_tensorboard:
-            log_dir = Path(cfg.save_dir) / "tensorboard" / self.name
+        if self.cfg.use_tensorboard:
+            log_dir = Path(self.cfg.save_dir) / "tensorboard" / self.name
             self.writer = SummaryWriter(str(log_dir))
-            get_logger().info(f"📊 TensorBoard logging to: {log_dir}")
 
-        # 训练历史
-        self.history = {
-            "epoch": [],
-            "stage": [],
-            "train_loss": [],
-            "val_loss": [],
-            "val_acc": [],
-            "mask_ratio": [],
-            "mask_prob": [],
-            "lr": [],
-            "epoch_time": [],
-        }
-
-        # 早停
-        self.early_stopping = EarlyStopping(
-            patience=cfg.early_stopping_patience, mode="min"
-        )
-
-        self.best_val_loss = float("inf")
-        self.best_epoch = 0
-
-        # 指标计算器和历史保存器
-        self.history_saver = HistorySaver(cfg.save_dir)
-
-        # 保存配置
-        cfg.save()
+    def _init_tracking_structures(self):
+        """初始化训练历史、早停与记录器"""
+        self.history = {k: [] for k in ["epoch", "stage", "train_loss", "val_loss", "val_acc", "mask_ratio", "mask_prob", "lr", "epoch_time"]}
+        self.early_stopping = EarlyStopping(patience=self.cfg.early_stopping_patience, mode="min")
+        self._best_val_loss, self._best_epoch = float("inf"), 0
+        self.history_saver = HistorySaver(self.cfg.save_dir)
 
     def get_models(self) -> List[nn.Module]:
         """获取所有模型列表 (与其他 Trainer 接口一致)"""
@@ -262,210 +227,163 @@ class StagedEnsembleTrainer(CheckpointMixin):
             return 3, "Finetune", cfg.finetune_mask_ratio, cfg.finetune_mask_prob, True
 
     def _train_epoch(self, train_loader: DataLoader, epoch: int) -> float:
-        """训练一个epoch"""
+        """训练单个 Epoch (大纲化)"""
+        # 1. 准备当前阶段参数
+        *_, m_ratio, m_prob, use_mask = self._get_stage_info(epoch)
         criterion = nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
-        stage_num, stage_name, mask_ratio, mask_prob, use_mask = self._get_stage_info(
-            epoch
-        )
 
-        # 预计算mask（如果需要）
-        for worker in self.workers:
-            worker.precompute_masks(self.cfg.mask_pool_size, mask_ratio)
+        # 2. 预热 Workers (如预计算 Mask 池)
+        for w in self.workers: w.precompute_masks(self.cfg.mask_pool_size, m_ratio)
 
-        total_loss = 0.0
-        num_batches = 0
-        current_lr = self.workers[0].get_lr()
-        iterator = tqdm(
-            train_loader,
-            desc=f"Epoch {epoch + 1}/{self.cfg.total_epochs} [{stage_name}] lr={current_lr:.6f}",
-        )
+        # 3. 执行批次迭代
+        return self._run_batch_iteration(train_loader, epoch, criterion, m_ratio, m_prob, use_mask)
 
-        for inputs, targets in iterator:
-            # 异步训练
-            for worker in self.workers:
-                worker.train_batch_async(
-                    inputs, targets, criterion, mask_ratio, mask_prob, use_mask
-                )
+    def _run_batch_iteration(self, loader, epoch, criterion, m_ratio, m_prob, use_mask):
+        """具体执行张量流动与梯度更新"""
+        total_loss, n = 0.0, 0
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1} [LR={self.workers[0].get_lr():.6f}]")
 
-            # 同步并累计loss
-            batch_loss = 0.0
-            for worker in self.workers:
-                batch_loss += worker.synchronize()
+        for inputs, targets in pbar:
+            # 异步分发任务
+            for w in self.workers: 
+                w.train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask)
 
-            total_loss += batch_loss / len(self.workers)
-            num_batches += 1
+            # 同步并聚合损失
+            batch_loss = sum(w.synchronize() for w in self.workers) / len(self.workers)
+            total_loss += batch_loss
+            n += 1
+            pbar.set_postfix({"loss": f"{total_loss/n:.4f}"})
 
-            iterator.set_postfix({"loss": total_loss / num_batches})
-
-        # 更新学习率调度器（scheduler会基于缩放后的lr继续调整）
-        for worker in self.workers:
-            worker.step_schedulers()
-
-        return total_loss / num_batches
+        # 步进调度器
+        for w in self.workers: w.step_schedulers()
+        return total_loss / n
 
     @torch.no_grad()
     def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
-        """验证"""
+        """集成验证过程"""
         criterion = nn.CrossEntropyLoss()
-        total_loss = 0.0
-        correct = 0
-        total = 0
-
-        # 使用第一个worker的设备作为主设备进行计算
-        primary_device = self.workers[0].device
+        total_loss, correct, total = 0.0, 0, 0
+        device = self.workers[0].device  # 主计算设备
 
         for inputs, targets in val_loader:
-            all_logits = []
-            for worker in self.workers:
-                worker_logits = worker.predict_batch(inputs)
-                all_logits.append(worker_logits.to(primary_device))
+            # 1. 聚合所有 Worker 的预测 Logits
+            ensemble_logits = self._collect_ensemble_logits(inputs, device)
+            targets = targets.to(device)
 
-            all_logits = torch.cat(all_logits, dim=0)
-            ensemble_logits = all_logits.mean(dim=0)
-
-            # 确保targets也在主设备上
-            targets = targets.to(primary_device)
-
-            loss = criterion(ensemble_logits, targets)
-            total_loss += loss.item()
-
-            preds = ensemble_logits.argmax(dim=1)
-            correct += (preds == targets).sum().item()
+            # 2. 计算指标
+            total_loss += criterion(ensemble_logits, targets).item()
+            correct += (ensemble_logits.argmax(1) == targets).sum().item()
             total += targets.size(0)
 
-        avg_loss = total_loss / len(val_loader)
-        accuracy = 100.0 * correct / total
-        return avg_loss, accuracy
+        return total_loss / len(val_loader), 100. * correct / total
+
+    def _collect_ensemble_logits(self, inputs, device):
+        """从分布式 Workers 中收集并平均预测结果"""
+        logits_list = [w.predict_batch(inputs).to(device) for w in self.workers]
+        return torch.stack(logits_list).mean(0)
 
     def train(self, train_loader: DataLoader, val_loader: DataLoader):
-        """执行完整训练"""
-        self.logger.info("=" * 70)
-        self.logger.info(f"🎓 Three-Stage Curriculum Learning: {self.name}")
-        self.logger.info("=" * 70)
-
-        current_stage = 0
-        training_start_time = time.time()
+        """执行全生命周期训练 (大纲化)"""
+        self._log_training_start()
+        start_time, current_stage = time.time(), 0
 
         try:
             for epoch in range(self.cfg.total_epochs):
-                epoch_start_time = time.time()
-                stage_num, stage_name, mask_ratio, mask_prob, use_mask = (
-                    self._get_stage_info(epoch)
-                )
+                # 1. 周期准备 (阶段切换)
+                current_stage = self._handle_epoch_prep(epoch, current_stage)
+                
+                # 2. 执行训练与验证循环
+                stats = self._run_epoch_cycle(train_loader, val_loader, epoch)
+                
+                # 3. 生命周期钩子: 记录、持久化、早停
+                self._handle_epoch_post(epoch, stats)
+                if self.early_stopping(stats["val_loss"], epoch): break
 
-                # 阶段切换提示
-                if stage_num != current_stage:
-                    # 共享 backbone: 在从 Stage 1 切换到 Stage 2 时广播
-                    if (
-                        stage_num == 2
-                        and current_stage == 1
-                        and self.share_warmup_backbone
-                    ):
-                        self._broadcast_warmup_backbone()
+            self._finalize_training(start_time)
 
-                    current_stage = stage_num
-                    self.logger.info("")
-                    self.logger.info("=" * 70)
-                    if stage_num == 1:
-                        self.logger.info("🔥 STAGE 1: WARMUP (No Mask)")
-                    elif stage_num == 2:
-                        self.logger.info("🎭 STAGE 2: PROGRESSIVE MASKING")
-                    else:
-                        self.logger.info("🎯 STAGE 3: FINE-TUNING")
-                    self.logger.info("=" * 70)
-
-                # 训练
-                try:
-                    train_loss = self._train_epoch(train_loader, epoch)
-                except RuntimeError as e:
-                    if "out of memory" in str(e):
-                        self.logger.error("❌ GPU Out of Memory!")
-                        torch.cuda.empty_cache()
-                        raise
-                    else:
-                        raise
-
-                # 验证
-                val_loss, val_acc = self._validate(val_loader)
-
-                epoch_elapsed = time.time() - epoch_start_time
-                current_lr = self.workers[0].optimizers[0].param_groups[0]["lr"]
-
-                # 记录历史
-                self.history["epoch"].append(epoch + 1)
-                self.history["stage"].append(stage_num)
-                self.history["train_loss"].append(train_loss)
-                self.history["val_loss"].append(val_loss)
-                self.history["val_acc"].append(val_acc)
-                self.history["mask_ratio"].append(mask_ratio)
-                self.history["mask_prob"].append(mask_prob)
-                self.history["lr"].append(current_lr)
-                self.history["epoch_time"].append(epoch_elapsed)
-
-                # TensorBoard
-                if self.writer:
-                    self.writer.add_scalar("Loss/train", train_loss, epoch)
-                    self.writer.add_scalar("Loss/val", val_loss, epoch)
-                    self.writer.add_scalar("Accuracy/val", val_acc, epoch)
-                    self.writer.add_scalar("Hyperparameters/lr", current_lr, epoch)
-                    self.writer.add_scalar(
-                        "Time/epoch_duration_sec", epoch_elapsed, epoch
-                    )
-
-                # 保存最佳模型
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    self.best_epoch = epoch
-                    self._save_checkpoint("best")
-                    self.logger.info(f"   🏆 New best model! Val Loss: {val_loss:.4f}")
-
-                # 定期保存
-                if (epoch + 1) % self.cfg.save_every_n_epochs == 0:
-                    self._save_checkpoint(f"epoch_{epoch + 1}")
-                    self._cleanup_old_checkpoints()
-
-                # 日志
-                mask_info = (
-                    f"MaskR={mask_ratio:.1%}, MaskP={mask_prob:.1%}"
-                    if use_mask
-                    else "NoMask"
-                )
-                self.logger.info(
-                    f"Epoch {epoch + 1:3d}/{self.cfg.total_epochs} [{stage_name:11s}] | "
-                    f"TrainLoss: {train_loss:.4f} | ValLoss: {val_loss:.4f} | ValAcc: {val_acc:.2f}% | "
-                    f"{mask_info} | LR: {current_lr:.6f} | Time: {epoch_elapsed:.1f}s"
-                )
-
-                # 早停检查
-                if self.early_stopping(val_loss, epoch):
-                    self.logger.info(
-                        f"\n⚠️ Early stopping triggered at epoch {epoch + 1}"
-                    )
-                    break
-
-            self.total_training_time = time.time() - training_start_time
-            self.logger.info(
-                f"\n⏱️ Total Training Time: {format_duration(self.total_training_time)}"
-            )
-
-            self._save_checkpoint("final")
-            self.history_saver.save(self.history)
-            self.logger.info(f"\n✅ Training completed: {self.name}")
-
-        except KeyboardInterrupt:
-            self.logger.info("\n⚠️ Training interrupted by user")
-            self.total_training_time = time.time() - training_start_time
-            self._save_checkpoint("interrupted")
-            self.history_saver.save(self.history)
-            raise
         except Exception as e:
-            self.logger.error(f"\n❌ Training failed with error: {e}")
-            self._save_checkpoint("error")
-            self.history_saver.save(self.history)
+            self._handle_training_error(e, start_time)
             raise
         finally:
-            if self.writer:
-                self.writer.close()
+            if self.writer: self.writer.close()
+
+    def _handle_epoch_prep(self, epoch, current_stage):
+        """处理 Epoch 开始前的预备动作 (如阶段切换)"""
+        s_num, s_name, *_ = self._get_stage_info(epoch)
+        if s_num != current_stage:
+            # 执行阶段切换逻辑 (如 Backbone 广播)
+            if s_num == 2 and current_stage == 1 and self.share_warmup_backbone:
+                self._broadcast_warmup_backbone()
+            self._log_stage_header(s_num)
+        return s_num
+
+    def _run_epoch_cycle(self, train_loader, val_loader, epoch):
+        """执行单个 Epoch 的计算循环并收集指标"""
+        t0 = time.time()
+        t_loss = self._train_epoch(train_loader, epoch)
+        v_loss, v_acc = self._validate(val_loader)
+        
+        # 获取当前元数据
+        _, _, m_ratio, m_prob, _ = self._get_stage_info(epoch)
+        return {
+            "train_loss": t_loss, "val_loss": v_loss, "val_acc": v_acc,
+            "mask_ratio": m_ratio, "mask_prob": m_prob, 
+            "lr": self.workers[0].get_lr(), "time": time.time() - t0
+        }
+
+    def _handle_epoch_post(self, epoch, stats):
+        """处理 Epoch 结束后的辅助动作 (日志、快照、清理)"""
+        # 1. 记录历史与 TensorBoard
+        self._record_metrics(epoch, stats)
+        
+        # 2. 处理最佳模型保存
+        if stats["val_loss"] < self._best_val_loss:
+            self._best_val_loss, self._best_epoch = stats["val_loss"], epoch
+            self._save_checkpoint("best")
+            self.logger.info(f"   🏆 New Best: {stats['val_loss']:.4f}")
+
+        # 3. 定期检查点
+        if (epoch + 1) % self.cfg.save_every_n_epochs == 0:
+            self._save_checkpoint(f"epoch_{epoch+1}")
+            self._cleanup_old_checkpoints()
+
+        # 4. 打印汇总日志
+        self._log_epoch_summary(epoch, stats)
+
+    def _log_training_start(self):
+        self.logger.info("=" * 70 + f"\n🎓 Staged Training Start: {self.name}\n" + "=" * 70)
+
+    def _log_stage_header(self, num):
+        titles = {1: "STAGE 1: WARMUP", 2: "STAGE 2: PROGRESSIVE", 3: "STAGE 3: FINETUNE"}
+        self.logger.info(f"\n{'='*20} {titles.get(num, 'UNKNOWN')} {'='*20}")
+
+    def _record_metrics(self, epoch, stats):
+        """同步历史记录与可视化工具"""
+        for k, v in stats.items(): self.history[k].append(v)
+        self.history["epoch"].append(epoch + 1)
+        if self.writer:
+            self.writer.add_scalar("Loss/Val", stats["val_loss"], epoch)
+            self.writer.add_scalar("Acc/Val", stats["val_acc"], epoch)
+
+    def _log_epoch_summary(self, epoch, stats):
+        _, s_name, _, _, _ = self._get_stage_info(epoch)
+        self.logger.info(
+            f"Epoch {epoch+1:3d} [{s_name:11s}] | "
+            f"T-Loss: {stats['train_loss']:.4f} | V-Loss: {stats['val_loss']:.4f} | "
+            f"V-Acc: {stats['val_acc']:.2f}% | LR: {stats['lr']:.6f} | {stats['time']:.1f}s"
+        )
+
+    def _finalize_training(self, start_time):
+        self.total_training_time = time.time() - start_time
+        self.logger.info(f"\n⏱️ Total Time: {format_duration(self.total_training_time)}")
+        self._save_checkpoint("final")
+        self.history_saver.save(self.history)
+
+    def _handle_training_error(self, error, start_time):
+        self.logger.error(f"\n❌ Training Failed: {error}")
+        self.total_training_time = time.time() - start_time
+        self._save_checkpoint("error")
+        self.history_saver.save(self.history)
 
     def _broadcast_warmup_backbone(self):
         """从第一个模型获取 backbone，广播到所有子模型并重新初始化各自的 classifier head"""

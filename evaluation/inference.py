@@ -17,84 +17,46 @@ from torch.utils.data import DataLoader
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def get_models_from_source(
-    trainer_or_models: Any,
-) -> Tuple[List[nn.Module], torch.device]:
-    """
-    从 Trainer 或模型列表中提取模型和设备
+def get_models_from_source(source: Any) -> Tuple[List[nn.Module], torch.device]:
+    """多态探测: 从 Trainer, Worker 或 List[Module] 中提取资源"""
+    # 1. 解析模型列表
+    if hasattr(source, "get_models"):
+        models = source.get_models()
+    elif hasattr(source, "workers"):
+        models = [m for w in source.workers for m in w.models]
+    else:
+        models = source # 假定为 List[nn.Module]
+    
+    # 2. 解析计算设备
+    def _probe_device(objs):
+        for o in objs: 
+            if hasattr(o, "device"): return o.device
+            p = next(o.parameters(), None)
+            if p is not None: return p.device
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    Args:
-        trainer_or_models: Trainer 实例或 List[nn.Module]
-
-    Returns:
-        (models, device): 模型列表和计算设备
-    """
-    # 优先使用统一的 get_models() 接口
-    if hasattr(trainer_or_models, "get_models"):
-        models = trainer_or_models.get_models()
-        # 从第一个模型获取设备
-        if models:
-            device = next(models[0].parameters()).device
-        else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 后备: 直接访问 workers 属性 (向后兼容)
-    elif hasattr(trainer_or_models, "workers"):
-        models = [
-            model for worker in trainer_or_models.workers for model in worker.models
-        ]
-        device = trainer_or_models.workers[0].device
-    else:  # 是模型列表
-        models = trainer_or_models
-        try:
-            device = next(models[0].parameters()).device
-        except StopIteration:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return models, device
+    return models, _probe_device(source.workers if hasattr(source, "workers") else models)
 
 
-def get_all_models_logits(
-    models: List[nn.Module], loader: DataLoader, device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    获取所有模型在数据集上的 logits
-
-    Args:
-        models: 模型列表 List[nn.Module]
-        loader: 数据加载器
-        device: 计算设备
-
-    Returns:
-        all_logits: (num_models, num_samples, num_classes)
-        targets: (num_samples,)
-    """
+def get_all_models_logits(models: List[nn.Module], loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """全量数据集推理门面 (大纲化)"""
     from tqdm import tqdm
-
-    all_logits_list = []
-    all_targets_list = []
-
-    iterator = tqdm(loader, desc="Evaluating Models", leave=False)
-
+    all_l, all_t = [], []
+    
     with torch.no_grad():
-        for inputs, targets in iterator:
-            inputs = inputs.to(device)
-            batch_logits = []
+        for x, y in tqdm(loader, desc="Inference", leave=False):
+            # 将 [N_models, Batch, D] 暂存
+            batch_l = _infer_models_on_batch(models, x.to(device))
+            all_l.append(batch_l)
+            all_t.append(y)
 
-            for model in models:
-                model.eval()
-                logits = model(inputs)  # (batch_size, num_classes)
-                batch_logits.append(logits.unsqueeze(0).cpu())
+    if not all_l: return torch.tensor([]), torch.tensor([])
+    return torch.cat(all_l, dim=1), torch.cat(all_t)
 
-            # combined: (num_models, batch_size, num_classes)
-            if batch_logits:
-                combined = torch.cat(batch_logits, dim=0)
-                all_logits_list.append(combined)
-                all_targets_list.append(targets.cpu())
-
-    if not all_logits_list:
-        return torch.tensor([]), torch.tensor([])
-
-    # 沿着 batch 维度 (dim=1) 拼接
-    all_logits = torch.cat(all_logits_list, dim=1)
-    all_targets = torch.cat(all_targets_list)
-
-    return all_logits, all_targets
+def _infer_models_on_batch(models, x):
+    """单批次多模型推理核心"""
+    batch_res = []
+    for m in models:
+        m.eval()
+        batch_res.append(m(x).unsqueeze(0).cpu())
+    return torch.cat(batch_res, dim=0) # [num_models, batch_size, num_classes]

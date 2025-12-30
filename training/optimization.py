@@ -16,69 +16,28 @@ import torch.optim as optim
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def create_optimizer(
-    model: nn.Module,
-    optimizer_name: str,
-    lr: float,
-    weight_decay: float,
-    sgd_momentum: float = 0.9,
-) -> optim.Optimizer:
-    """
-    创建优化器
-
-    Args:
-        model: 模型
-        optimizer_name: 优化器名称 (adamw, sgd, adam, rmsprop)
-        lr: 学习率
-        weight_decay: 权重衰减
-        sgd_momentum: SGD 动量 (默认 0.9)
-
-    Returns:
-        optimizer: 优化器实例
-    """
-    optimizer_name = optimizer_name.lower()
+def create_optimizer(model, name, lr, weight_decay, sgd_momentum=0.9) -> optim.Optimizer:
+    """创建优化器 (大纲化)"""
+    name = name.lower()
     params = model.parameters()
 
-    if optimizer_name == "adamw":
-        return optim.AdamW(params, lr=lr, weight_decay=weight_decay)
-    elif optimizer_name == "adam":
-        return optim.Adam(params, lr=lr, weight_decay=weight_decay)
-    elif optimizer_name == "sgd":
-        return optim.SGD(
-            params, lr=lr, weight_decay=weight_decay, momentum=sgd_momentum
-        )
-    elif optimizer_name == "rmsprop":
-        return optim.RMSprop(params, lr=lr, weight_decay=weight_decay)
-    else:
-        raise ValueError(
-            f"不支持的优化器: {optimizer_name}. 支持: adamw, sgd, adam, rmsprop"
-        )
+    # 1. 路由至具体的优化器类
+    if name == "adamw": return optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    if name == "adam": return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+    if name == "sgd": return optim.SGD(params, lr=lr, weight_decay=weight_decay, momentum=sgd_momentum)
+    if name == "rmsprop": return optim.RMSprop(params, lr=lr, weight_decay=weight_decay)
+
+    raise ValueError(f"不支持的优化器: {name}")
 
 
-def create_scheduler(
-    optimizer: optim.Optimizer,
-    scheduler_name: str,
-    total_epochs: int,
-) -> Optional[optim.lr_scheduler.LRScheduler]:
-    """
-    创建学习率调度器
-
-    Args:
-        optimizer: 优化器
-        scheduler_name: 调度器名称 (cosine, none)
-        total_epochs: 总训练轮数
-
-    Returns:
-        scheduler: 调度器实例，none 时返回 None
-    """
-    scheduler_name = scheduler_name.lower()
-
-    if scheduler_name == "cosine":
-        return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
-    elif scheduler_name == "none":
-        return None
-    else:
-        raise ValueError(f"不支持的调度器: {scheduler_name}. 支持: cosine, none")
+def create_scheduler(optimizer, name, total_epochs) -> Optional[optim.lr_scheduler.LRScheduler]:
+    """创建学习率调度器 (大纲化)"""
+    name = name.lower()
+    
+    if name == "cosine": return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
+    if name == "none": return None
+    
+    raise ValueError(f"不支持的调度器: {name}")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -87,49 +46,35 @@ def create_scheduler(
 
 
 class EarlyStopping:
-    """早停机制
-
-    用于在验证指标不再改善时提前停止训练，防止过拟合。
-
-    Args:
-        patience: 允许的最大无改善的epoch数
-        min_delta: 最小改善阈值
-        mode: 'min' 或 'max'，指定指标是越小越好还是越大越好
-    """
+    """早停控制逻辑 (大纲化)"""
 
     def __init__(self, patience: int = 10, min_delta: float = 0.0, mode: str = "min"):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.mode = mode
+        self.patience, self.min_delta, self.mode = patience, min_delta, mode
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.best_epoch = 0
 
     def __call__(self, score: float, epoch: int) -> bool:
-        """检查是否应该早停
-
-        Returns:
-            True 如果应该停止训练，否则 False
-        """
+        """检查并更新早停计数器"""
         if self.best_score is None:
             self.best_score = score
-            self.best_epoch = epoch
             return False
 
-        if self.mode == "min":
-            improved = score < (self.best_score - self.min_delta)
-        else:
-            improved = score > (self.best_score + self.min_delta)
-
-        if improved:
+        # 判定是否有所改善
+        if self._is_improvement(score):
             self.best_score = score
-            self.best_epoch = epoch
             self.counter = 0
             return False
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-                return True
-            return False
+        
+        # 处理无改善情况
+        self.counter += 1
+        if self.counter >= self.patience:
+            self.early_stop = True
+            return True
+        return False
+
+    def _is_improvement(self, score):
+        """核心准则判定段"""
+        if self.mode == "min":
+            return score < (self.best_score - self.min_delta)
+        return score > (self.best_score + self.min_delta)

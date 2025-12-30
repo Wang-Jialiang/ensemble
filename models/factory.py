@@ -30,34 +30,27 @@ def register_init(name: str):
 
 
 @register_init("kaiming")
-def init_kaiming(model: nn.Module) -> None:
-    """Kaiming (He) 初始化 - 适合ReLU激活"""
+def init_kaiming(model):
+    """Kaiming (He) 初始化段"""
     for m in model.modules():
         if isinstance(m, nn.Conv2d):
             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+            if m.bias is not None: nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.Linear):
             nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+            if m.bias is not None: nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
 
 
 @register_init("xavier")
-def init_xavier(model: nn.Module) -> None:
-    """Xavier (Glorot) 初始化 - 适合tanh/sigmoid激活"""
+def init_xavier(model):
+    """Xavier (Glorot) 初始化段"""
     for m in model.modules():
-        if isinstance(m, nn.Conv2d):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
             nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+            if m.bias is not None: nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
@@ -82,23 +75,13 @@ def init_default(model: nn.Module) -> None:
     pass
 
 
-def apply_init(model: nn.Module, init_method: str = "kaiming") -> nn.Module:
-    """
-    应用初始化策略
-
-    Args:
-        model: PyTorch模型
-        init_method: 初始化方法名称 (kaiming, xavier, orthogonal, default)
-
-    Returns:
-        初始化后的模型
-    """
-    init_method = init_method.lower()
-    if init_method not in INIT_REGISTRY:
-        raise ValueError(
-            f"不支持的初始化方法: {init_method}. 支持: {list(INIT_REGISTRY.keys())}"
-        )
-    INIT_REGISTRY[init_method](model)
+def apply_init(model: nn.Module, method: str = "kaiming") -> nn.Module:
+    """解析并应用初始化策略 (大纲化)"""
+    method = method.lower()
+    if method not in INIT_REGISTRY:
+        raise ValueError(f"不支持的初始化: {method}. 已注册: {list(INIT_REGISTRY.keys())}")
+    
+    INIT_REGISTRY[method](model)
     return model
 
 
@@ -171,45 +154,25 @@ def efficientnet_b0(num_classes: int):
 
 
 class ModelFactory:
-    """模型工厂"""
+    """模型生产工厂 (大纲化)"""
 
     @staticmethod
-    def create_model(
-        model_name: str,
-        num_classes: int = 10,
-        init_method: Optional[str] = None,
-        **kwargs,
-    ) -> nn.Module:
-        """
-        创建模型
+    def create_model(name: str, num_classes: int = 10, init: Optional[str] = None, **kwargs) -> nn.Module:
+        """核心生产线: 路由 -> 实例化 -> 初始化"""
+        name = name.lower()
 
-        参数:
-            model_name: 模型名称 (resnet18, resnet34, resnet50, vgg16, efficientnet_b0)
-            num_classes: 类别数
-            init_method: 初始化方法 (kaiming, xavier, orthogonal, default, None)
-                         None 表示使用模型内置初始化
-            **kwargs: 其他传递给模型构建器的参数
+        # 1. 解析构建器
+        if name not in MODEL_REGISTRY:
+            raise ValueError(f"模型未注册: {name}. 支持: {list(MODEL_REGISTRY.keys())}")
 
-        返回:
-            model: 创建的模型
-        """
-        model_name = model_name.lower()
+        # 2. 实例化模型
+        model = MODEL_REGISTRY[name](num_classes, **kwargs)
 
-        if model_name not in MODEL_REGISTRY:
-            raise ValueError(
-                f"不支持的模型: {model_name}. 支持: {list(MODEL_REGISTRY.keys())}"
-            )
-
-        builder = MODEL_REGISTRY[model_name]
-        model = builder(num_classes, **kwargs)
-
-        # 应用自定义初始化 (如果指定)
-        if init_method is not None:
-            apply_init(model, init_method)
+        # 3. 策略初始化 (可选)
+        if init: apply_init(model, init)
 
         return model
 
     @staticmethod
     def get_supported_models() -> List[str]:
-        """获取支持的模型列表"""
         return list(MODEL_REGISTRY.keys())

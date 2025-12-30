@@ -47,28 +47,26 @@ class BasePreloadedDataset(Dataset):
     NAME = "Base"
 
     def __init__(self, root: str, train: bool):
-        """
-        初始化数据集
-
-        参数:
-            root: 数据集根目录
-            train: 是否为训练集
-        """
+        """初始化数据集"""
         self.root = root
         self.train = train
         self.images: torch.Tensor = None
         self.targets: torch.Tensor = None
 
-        # 预计算标准化参数
+        # 1. 设置运行时常量
+        self._init_runtime_stats()
+
+        # 2. 调度执行数据加载
+        self._load_data()
+
+    def _init_runtime_stats(self):
+        """基于类属性初始化运行时张量"""
         self._mean = torch.tensor(self.MEAN).view(3, 1, 1)
         self._std = torch.tensor(self.STD).view(3, 1, 1)
 
-        # 下载并加载数据
-        self._load_data()
-
     def _load_data(self):
-        """加载数据到 self.images 和 self.targets (子类实现)"""
-        raise NotImplementedError("子类必须实现 _load_data 方法")
+        """由子类实现的具体加载逻辑"""
+        raise NotImplementedError("子类必须提供 _load_data 的具体实现")
 
     def _get_dataset_name(self) -> str:
         """返回数据集名称"""

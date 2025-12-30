@@ -180,3 +180,39 @@ eval_checkpoints:
 
   - name: "ExpE_Cutout_Curriculum"
     path: "./outputs/exp_latest/checkpoints/ExpE_Cutout_Curriculum/best"
+
+# ==============================================================================
+# 数据生成配置 (generate.py 使用)
+# ==============================================================================
+generation:
+  model_path: "stabilityai/stable-diffusion-2-1"  # SD 模型路径 (本地或 HF ID)
+  turbo_model_path: "stabilityai/sdxl-turbo"      # SDXL Turbo 模型路径 (极速模式)
+  use_turbo: false                                # 是否默认使用 Turbo 模式
+  turbo_steps: 1                                  # Turbo 推理步数 (1-4)
+  batch_size: 16                                 # 推理 Batch Size
+  samples_per_group: 1000                        # 每组样本数 (Domain/OOD)
+  visualize: true                                # 是否生成可视化对比图
+  num_vis: 10                                    # 每个类别/风格可视化的样本数
+
+  # Domain Shift 风格与提示词
+  styles:
+    sketch: "pencil sketch drawing"
+    painting: "oil painting artwork"
+    cartoon: "cartoon illustration style"
+    watercolor: "watercolor painting art"
+
+  # Domain Shift 强度
+  strengths: [0.3, 0.5, 0.7]
+
+  # OOD Prompts (Text2Img)
+  ood_prompts:
+    - "abstract colorful geometric patterns"
+    - "underwater coral reef with tropical fish"
+    - "close-up of delicious food dishes"
+    - "city street at night with neon lights"
+    - "cartoon character illustration"
+    - "ancient stone ruins in jungle"
+    - "microscopic view of cells"
+    - "aurora borealis in night sky"
+    - "vintage book pages with text"
+    - "crystal formations in cave"

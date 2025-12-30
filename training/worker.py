@@ -31,66 +31,45 @@ class GPUWorker:
     管理单个GPU上的多个模型实例，支持异步训练以最大化GPU利用率。
     """
 
-    def __init__(
-        self,
-        gpu_id: int,
-        num_models: int,
-        cfg: Config,
-        augmentation_method: str = "perlin",
-    ):
+    def __init__(self, gpu_id: int, num_models: int, cfg: Config, augmentation_method: str = "perlin"):
+        """GPU Worker 构造函数 (大纲化)"""
         self.gpu_id = gpu_id
         self.device = torch.device(f"cuda:{gpu_id}")
-        self.cfg = cfg
-        self.num_models = num_models
+        self.cfg, self.num_models = cfg, num_models
 
-        # 创建模型
-        self.models: List[nn.Module] = []
-        self.optimizers: List[optim.Optimizer] = []
-        self.schedulers: List[Optional[optim.lr_scheduler.LRScheduler]] = []
+        # 1. 初始化深度学习组件 (模型, 优化器, 调度器)
+        self.models, self.optimizers, self.schedulers = self._setup_models_and_optim()
 
-        for _ in range(num_models):
-            model = ModelFactory.create_model(
-                cfg.model_name,
-                num_classes=cfg.num_classes,
-                init_method=cfg.init_method,
-            )
-            model = model.to(self.device)
+        # 2. 初始化数据增强引擎
+        self._init_augmentation(augmentation_method)
 
-            if cfg.compile_model and hasattr(torch, "compile"):
-                model = torch.compile(model)
-
-            # 使用工厂函数创建优化器和调度器
-            optimizer = create_optimizer(
-                model,
-                cfg.optimizer,
-                cfg.lr,
-                cfg.weight_decay,
-                sgd_momentum=cfg.sgd_momentum,
-            )
-            scheduler = create_scheduler(
-                optimizer,
-                cfg.scheduler,
-                cfg.total_epochs,
-            )
-
-            self.models.append(model)
-            self.optimizers.append(optimizer)
-            self.schedulers.append(scheduler)
-
-        # 创建增强方法
-        self.augmentation_method = augmentation_method
-        self.augmentation = self._create_augmentation(augmentation_method)
-
-        # 模型级增强: 初始化每个模型的固定 seed
-        self.use_model_level_aug = cfg.model_level_augmentation
-        if self.use_model_level_aug:
-            # 每个模型分配唯一 seed，用于动态生成 mask
-            # ratio 参数在训练时传入，可随阶段变化
-            self.augmentation.init_model_seeds(num_models=num_models)
-
-        # Stream
+        # 3. 初始化异步执行流水线 (Stream)
         self.stream = torch.cuda.Stream(device=self.device)
         self._pending_loss = None
+
+    def _setup_models_and_optim(self) -> Tuple[list, list, list]:
+        """批量创建模型及配套优化工具"""
+        ms, os, ss = [], [], []
+        for _ in range(self.num_models):
+            m = ModelFactory.create_model(self.cfg.model_name, self.cfg.num_classes, self.cfg.init_method).to(self.device)
+            if self.cfg.compile_model and hasattr(torch, "compile"): m = torch.compile(m)
+            
+            opt = create_optimizer(m, self.cfg.optimizer, self.cfg.lr, self.cfg.weight_decay, sgd_momentum=self.cfg.sgd_momentum)
+            sch = create_scheduler(opt, self.cfg.scheduler, self.cfg.total_epochs)
+            
+            ms.append(m); os.append(opt); ss.append(sch)
+        return ms, os, ss
+
+    def _init_augmentation(self, method):
+        """配置增强实例及其固定种子池"""
+        if method not in AUGMENTATION_REGISTRY:
+            raise ValueError(f"不支持的增强方法: {method}")
+            
+        self.augmentation = AUGMENTATION_REGISTRY[method](self.device, self.cfg)
+        self._use_model_level = self.cfg.model_level_augmentation
+        
+        if self._use_model_level:
+            self.augmentation.init_model_seeds(num_models=self.num_models)
 
     def _create_augmentation(self, method: str) -> AugmentationMethod:
         """创建增强方法"""
@@ -111,60 +90,54 @@ class GPUWorker:
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)
 
-    def train_batch_async(
-        self,
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        criterion: nn.Module,
-        mask_ratio: float,
-        mask_prob: float,
-        use_mask: bool,
-    ):
-        """异步训练一个batch"""
+    def train_batch_async(self, inputs, targets, criterion, m_ratio, m_prob, use_mask):
+        """执行异步批次训练 (大纲化)"""
         with torch.cuda.stream(self.stream):
+            # 1. 搬运数据至显存
             inputs = inputs.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
+            # 2. 依次迭代管理的所有模型
             total_loss = 0.0
-
-            for model_idx, (model, optimizer) in enumerate(
-                zip(self.models, self.optimizers)
-            ):
-                model.train()
-                optimizer.zero_grad(set_to_none=True)
-
-                # 应用增强
-                if use_mask:
-                    # 模型级增强: 传递 model_index，否则为 None (样本级)
-                    aug_inputs, aug_targets = self.augmentation.apply(
-                        inputs,
-                        targets,
-                        mask_ratio,
-                        mask_prob,
-                        model_index=model_idx if self.use_model_level_aug else None,
-                    )
-                else:
-                    aug_inputs, aug_targets = inputs, targets
-                # 前向传播
-                if self.cfg.use_amp:
-                    # 使用 BFloat16, 无需 GradScaler
-                    with autocast("cuda", dtype=torch.bfloat16):
-                        outputs = model(aug_inputs)
-                        loss = criterion(outputs, aug_targets)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
-                    optimizer.step()
-                else:
-                    # FP32: 标准训练
-                    outputs = model(aug_inputs)
-                    loss = criterion(outputs, aug_targets)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
-                    optimizer.step()
-
-                total_loss += loss.item()
+            for i, (m, opt) in enumerate(zip(self.models, self.optimizers)):
+                total_loss += self._step_model(i, m, opt, inputs, targets, criterion, m_ratio, m_prob, use_mask)
 
             self._pending_loss = total_loss / self.num_models
+
+    def _step_model(self, idx, model, optimizer, inputs, targets, criterion, m_ratio, m_prob, use_mask):
+        """执行单个模型的梯度更新步"""
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+
+        # 1. 准备增强数据
+        x, y = self._prepare_training_data(idx, inputs, targets, m_ratio, m_prob, use_mask)
+
+        # 2. 执行前向与反向传播
+        loss = self._forward_backward(model, x, y, criterion)
+
+        # 3. 梯度裁剪与参数更新
+        nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+        optimizer.step()
+        
+        return loss.item()
+
+    def _prepare_training_data(self, idx, x, y, ratio, prob, use_mask):
+        """根据策略应用数据增强"""
+        if not use_mask: return x, y
+        
+        model_idx = idx if self._use_model_level else None
+        return self.augmentation.apply(x, y, ratio, prob, model_index=model_idx)
+
+    def _forward_backward(self, model, x, y, criterion):
+        """内部执行计算链路"""
+        if self.cfg.use_amp:
+            with autocast("cuda", dtype=torch.bfloat16):
+                loss = criterion(model(x), y)
+        else:
+            loss = criterion(model(x), y)
+            
+        loss.backward()
+        return loss
 
     def synchronize(self) -> float:
         """同步并返回平均loss"""
@@ -239,22 +212,28 @@ class GPUWorker:
 
 
 class HistorySaver:
-    """训练历史保存器"""
+    """训练历史 CSV 保存器 (大纲化)"""
 
     def __init__(self, save_dir: str):
         self.save_dir = Path(save_dir)
         ensure_dir(self.save_dir)
 
     def save(self, history: Dict[str, List], filename: str = "history"):
-        """保存训练历史为CSV"""
+        """将历史字典导出至 CSV 文件"""
         import csv
+        path = self.save_dir / f"{filename}.csv"
+        
+        if not history: return
 
-        csv_path = self.save_dir / f"{filename}.csv"
-        with open(csv_path, "w", newline="") as f:
-            if history:
-                writer = csv.DictWriter(f, fieldnames=history.keys())
-                writer.writeheader()
-                for i in range(len(history[list(history.keys())[0]])):
-                    row = {k: v[i] for k, v in history.items()}
-                    writer.writerow(row)
-        get_logger().info(f"💾 History saved to: {csv_path}")
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=history.keys())
+            writer.writeheader()
+            self._write_rows(writer, history)
+            
+        get_logger().info(f"💾 History saved: {path}")
+
+    def _write_rows(self, writer, history):
+        """遍历并写入行数据"""
+        num_entries = len(next(iter(history.values())))
+        for i in range(num_entries):
+            writer.writerow({k: v[i] for k, v in history.items()})

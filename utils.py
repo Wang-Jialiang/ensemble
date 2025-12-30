@@ -14,44 +14,24 @@ from typing import Optional, Union
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def get_logger(
-    log_level: int = logging.INFO, log_file: Optional[str] = None
-) -> logging.Logger:
-    """获取全局 logger 实例 (延迟初始化 + 单例模式)
+def get_logger(level: int = logging.INFO, file: str = None) -> logging.Logger:
+    """获取单例 NDE Logger"""
+    log = logging.getLogger("NDE")
+    if log.handlers: return log
 
-    利用 logging.getLogger 的内置单例特性，相同名称的 logger 在整个进程中是同一个对象。
+    log.setLevel(level)
+    fmt = logging.Formatter("%(message)s")
+    
+    # 终端输出
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt); log.addHandler(ch)
 
-    Args:
-        log_level: 日志级别 (默认 INFO，仅首次调用生效)
-        log_file: 日志文件路径 (可选，仅首次调用生效)
-
-    Returns:
-        配置好的 logger 实例
-    """
-    logger = logging.getLogger("NDE")
-
-    # 已配置过，直接返回 (单例)
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(log_level)
-
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(console_handler)
-
-    # 文件处理器 (可选)
-    if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
-        logger.addHandler(file_handler)
-
-    return logger
+    # 文件输出 (可选)
+    if file:
+        fh = logging.FileHandler(file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        log.addHandler(fh)
+    return log
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗

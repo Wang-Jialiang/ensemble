@@ -21,110 +21,35 @@ from .inference import get_models_from_source
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def fgsm_attack(
-    model: nn.Module,
-    images: torch.Tensor,
-    labels: torch.Tensor,
-    eps: float,
-    mean: torch.Tensor,
-    std: torch.Tensor,
-) -> torch.Tensor:
-    """FGSM (Fast Gradient Sign Method) 对抗攻击
+def _get_norm_params(eps, alpha, mean, std):
+    """计算标准化空间下的扰动边界与裁剪范围"""
+    return (eps / std, alpha / std if alpha else None, (0 - mean) / std, (1 - mean) / std)
 
-    单步攻击，沿损失梯度符号方向添加扰动。
-
-    Args:
-        model: 目标模型
-        images: 输入图像 (已标准化)
-        labels: 真实标签
-        eps: 扰动强度 ε (在原始像素空间, 如 8/255)
-        mean: 标准化均值
-        std: 标准化标准差
-
-    Returns:
-        对抗样本 (已标准化)
-    """
+def fgsm_attack(model, images, labels, eps, mean, std) -> torch.Tensor:
+    """FGSM 攻击: std 空间变换 -> 符号梯度 -> 裁剪"""
+    e_n, _, lower, upper = _get_norm_params(eps, None, mean, std)
     images = images.clone().detach().requires_grad_(True)
-    outputs = model(images)
-    loss = F.cross_entropy(outputs, labels)
+    
+    loss = F.cross_entropy(model(images), labels)
     loss.backward()
+    
+    adv = images + e_n * images.grad.sign()
+    return torch.max(torch.min(adv, upper), lower).detach()
 
-    # 在原始像素空间计算扰动，然后转换回标准化空间
-    eps_normalized = eps / std
-
-    perturbation = eps_normalized * images.grad.sign()
-    adv_images = images + perturbation
-
-    # 裁剪到有效范围
-    lower_bound = (0 - mean) / std
-    upper_bound = (1 - mean) / std
-    adv_images = torch.max(torch.min(adv_images, upper_bound), lower_bound)
-
-    return adv_images.detach()
-
-
-def pgd_attack(
-    model: nn.Module,
-    images: torch.Tensor,
-    labels: torch.Tensor,
-    eps: float,
-    alpha: float,
-    steps: int,
-    mean: torch.Tensor,
-    std: torch.Tensor,
-) -> torch.Tensor:
-    """PGD (Projected Gradient Descent) 对抗攻击
-
-    多步迭代攻击，是 FGSM 的增强版。
-
-    Args:
-        model: 目标模型
-        images: 输入图像 (已标准化)
-        labels: 真实标签
-        eps: 最大扰动强度 ε (在原始像素空间)
-        alpha: 每步扰动大小 α (在原始像素空间)
-        steps: 迭代步数
-        mean: 标准化均值
-        std: 标准化标准差
-
-    Returns:
-        对抗样本 (已标准化)
-    """
-    # 转换到标准化空间
-    eps_normalized = eps / std
-    alpha_normalized = alpha / std
-
-    # 有效范围
-    lower_bound = (0 - mean) / std
-    upper_bound = (1 - mean) / std
-
-    # 随机初始化扰动
-    adv_images = images.clone().detach()
-    random_noise = torch.empty_like(adv_images).uniform_(-1, 1) * eps_normalized
-    adv_images = adv_images + random_noise
-    adv_images = torch.max(torch.min(adv_images, upper_bound), lower_bound)
+def pgd_attack(model, images, labels, eps, alpha, steps, mean, std) -> torch.Tensor:
+    """PGD 攻击: 随机初始化 -> 迭代更新 -> 投影 -> 裁剪"""
+    e_n, a_n, lower, upper = _get_norm_params(eps, alpha, mean, std)
+    adv = (images + torch.empty_like(images).uniform_(-1, 1) * e_n).clamp(lower, upper)
 
     for _ in range(steps):
-        adv_images.requires_grad_(True)
-        outputs = model(adv_images)
-        loss = F.cross_entropy(outputs, labels)
-
-        model.zero_grad()
-        loss.backward()
-
-        # 沿梯度方向更新
-        grad_sign = adv_images.grad.sign()
-        adv_images = adv_images.detach() + alpha_normalized * grad_sign
-
-        # 投影到 ε-球内
-        delta = adv_images - images
-        delta = torch.max(torch.min(delta, eps_normalized), -eps_normalized)
-        adv_images = images + delta
-
-        # 裁剪到有效范围
-        adv_images = torch.max(torch.min(adv_images, upper_bound), lower_bound)
-
-    return adv_images.detach()
+        adv.requires_grad_(True)
+        loss = F.cross_entropy(model(adv), labels)
+        model.zero_grad(); loss.backward()
+        
+        # 迭代更新与投影
+        adv = images + (adv + a_n * adv.grad.sign() - images).clamp(-e_n, e_n)
+        adv = adv.clamp(lower, upper).detach()
+    return adv
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -132,146 +57,60 @@ def pgd_attack(
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def evaluate_adversarial(
-    trainer_or_models: Any,
-    test_loader: DataLoader,
-    eps: float = 8 / 255,
-    alpha: float = 2 / 255,
-    pgd_steps: int = 10,
-    dataset_name: str = "cifar10",
-    logger: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """对抗鲁棒性评估 (FGSM/PGD 实时攻击)
-
-    使用 FGSM 和 PGD 攻击评估集成模型的对抗鲁棒性。
-    攻击针对集成模型的平均 logits 进行。
-
-    Args:
-        trainer_or_models: StagedEnsembleTrainer 实例或 List[nn.Module]
-        test_loader: 测试数据加载器
-        eps: 扰动强度 ε (默认 8/255 ≈ 0.031)
-        alpha: PGD 步长 α (默认 2/255 ≈ 0.008)
-        pgd_steps: PGD 迭代步数 (默认 10)
-        dataset_name: 数据集名称 (用于获取标准化参数)
-        logger: 日志记录器
-
-    Returns:
-        包含对抗鲁棒性指标的字典
-    """
+def evaluate_adversarial(trainer_or_models, loader, eps=8/255, alpha=2/255, steps=10, dataset="cifar10", logger=None) -> Dict:
+    """集成对抗鲁棒性评估 (大纲化)"""
     from tqdm import tqdm
-
-    from ..datasets import DATASET_REGISTRY
-
-    logger = logger or get_logger()
-    logger.info("\n🗡️ Running Adversarial Robustness Evaluation")
-    logger.info(f"   ε = {eps:.4f} ({eps * 255:.1f}/255)")
-    logger.info(f"   PGD: α = {alpha:.4f}, steps = {pgd_steps}")
+    log = logger or get_logger()
+    log.info(f"\n🗡️ Adversarial Eval (ε={eps*255:.1f}/255, Steps={steps})")
 
     models, device = get_models_from_source(trainer_or_models)
+    mean, std = _get_dataset_norm(dataset, device)
+    
+    # 建立集成攻击外壳
+    ens_model = _EnsembleProxy(models).to(device).eval()
+    stats = {"total": 0, "clean": 0, "fgsm": 0, "pgd": 0}
 
-    # 获取数据集的标准化参数
-    if dataset_name.lower() in DATASET_REGISTRY:
-        DatasetClass = DATASET_REGISTRY[dataset_name.lower()]
-        mean = torch.tensor(DatasetClass.MEAN).view(1, 3, 1, 1).to(device)
-        std = torch.tensor(DatasetClass.STD).view(1, 3, 1, 1).to(device)
-    else:
-        # 默认使用 ImageNet 标准化参数
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(device)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(device)
+    pbar = tqdm(loader, desc="Adversarial", leave=False)
+    for x, y in pbar:
+        x, y = x.to(device), y.to(device)
+        stats["total"] += x.size(0)
+        
+        # 1. 干净精度
+        with torch.no_grad(): stats["clean"] += (ens_model(x).argmax(1) == y).sum().item()
+        
+        # 2. 对抗攻击 (FGSM/PGD)
+        stats["fgsm"] += _run_and_eval_attack(ens_model, fgsm_attack, x, y, eps, mean, std)
+        stats["pgd"] += _run_and_eval_attack(ens_model, pgd_attack, x, y, eps, alpha, steps, mean, std)
+        
+        pbar.set_postfix({k: f"{100*v/stats['total']:.1f}%" for k, v in stats.items() if k != "total"})
 
-    # 创建一个包装模型，输出集成的平均 logits
-    class EnsembleWrapper(nn.Module):
-        def __init__(self, models_list):
-            super().__init__()
-            self.models = nn.ModuleList(models_list)
+    return _summarize_adv_results(stats, eps, alpha, steps, log)
 
-        def forward(self, x):
-            logits_list = [m(x) for m in self.models]
-            return torch.stack(logits_list).mean(dim=0)
+class _EnsembleProxy(nn.Module):
+    def __init__(self, models): super().__init__(); self.models = nn.ModuleList(models)
+    def forward(self, x): return torch.stack([m(x) for m in self.models]).mean(0)
 
-    ensemble_model = EnsembleWrapper(models).to(device)
-    ensemble_model.eval()
+def _get_dataset_norm(name, device):
+    from ..datasets import DATASET_REGISTRY
+    cls = DATASET_REGISTRY.get(name.lower())
+    m = cls.MEAN if cls else [0.485, 0.456, 0.406]
+    s = cls.STD if cls else [0.229, 0.224, 0.225]
+    return torch.tensor(m).view(1,3,1,1).to(device), torch.tensor(s).view(1,3,1,1).to(device)
 
-    # 统计变量
-    clean_correct = 0
-    fgsm_correct = 0
-    pgd_correct = 0
-    total = 0
+def _run_and_eval_attack(model, attack_fn, x, y, *args):
+    """封装 攻击 -> 推理 -> 计数 逻辑"""
+    prev_training = model.training
+    model.train() # 确保允许梯度计算
+    for m in model.models: m.eval() # BN 维持 eval
+    
+    adv_x = attack_fn(model, x, y, *args)
+    
+    model.train(prev_training) 
+    with torch.no_grad(): return (model(adv_x).argmax(1) == y).sum().item()
 
-    pbar = tqdm(test_loader, desc="Adversarial Eval", leave=False)
-
-    for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-        batch_size = images.size(0)
-        total += batch_size
-
-        # 干净样本预测
-        with torch.no_grad():
-            clean_outputs = ensemble_model(images)
-            clean_preds = clean_outputs.argmax(dim=1)
-            clean_correct += (clean_preds == labels).sum().item()
-
-        # FGSM 攻击
-        ensemble_model.train()  # 需要梯度
-        for m in ensemble_model.models:
-            m.eval()  # 但 BN 保持 eval 模式
-
-        fgsm_images = fgsm_attack(ensemble_model, images, labels, eps, mean, std)
-
-        with torch.no_grad():
-            fgsm_outputs = ensemble_model(fgsm_images)
-            fgsm_preds = fgsm_outputs.argmax(dim=1)
-            fgsm_correct += (fgsm_preds == labels).sum().item()
-
-        # PGD 攻击
-        pgd_images = pgd_attack(
-            ensemble_model, images, labels, eps, alpha, pgd_steps, mean, std
-        )
-
-        with torch.no_grad():
-            pgd_outputs = ensemble_model(pgd_images)
-            pgd_preds = pgd_outputs.argmax(dim=1)
-            pgd_correct += (pgd_preds == labels).sum().item()
-
-        # 更新进度条
-        pbar.set_postfix(
-            {
-                "clean": f"{100 * clean_correct / total:.1f}%",
-                "fgsm": f"{100 * fgsm_correct / total:.1f}%",
-                "pgd": f"{100 * pgd_correct / total:.1f}%",
-            }
-        )
-
-    # 恢复 eval 模式
-    ensemble_model.eval()
-
-    # 计算指标
-    clean_acc = 100.0 * clean_correct / total
-    fgsm_acc = 100.0 * fgsm_correct / total
-    pgd_acc = 100.0 * pgd_correct / total
-
-    results = {
-        "clean_acc": clean_acc,
-        "fgsm_acc": fgsm_acc,
-        "pgd_acc": pgd_acc,
-        "fgsm_attack_success_rate": 100.0 - fgsm_acc,
-        "pgd_attack_success_rate": 100.0 - pgd_acc,
-        "fgsm_robustness_drop": clean_acc - fgsm_acc,
-        "pgd_robustness_drop": clean_acc - pgd_acc,
-        "eps": eps,
-        "eps_255": eps * 255,
-        "alpha": alpha,
-        "pgd_steps": pgd_steps,
-        "num_samples": total,
-    }
-
-    logger.info("   ✅ Adversarial Robustness Results:")
-    logger.info(f"      Clean Accuracy: {clean_acc:.2f}%")
-    logger.info(f"      FGSM Accuracy (ε={eps * 255:.0f}/255): {fgsm_acc:.2f}%")
-    logger.info(
-        f"      PGD-{pgd_steps} Accuracy (ε={eps * 255:.0f}/255): {pgd_acc:.2f}%"
-    )
-    logger.info(f"      FGSM Robustness Drop: {clean_acc - fgsm_acc:.2f}%")
-    logger.info(f"      PGD Robustness Drop: {clean_acc - pgd_acc:.2f}%")
-
-    return results
+def _summarize_adv_results(s, eps, alpha, steps, log):
+    t = s["total"]
+    res = { "clean_acc": 100*s["clean"]/t, "fgsm_acc": 100*s["fgsm"]/t, "pgd_acc": 100*s["pgd"]/t,
+            "eps": eps, "eps_255": eps*255, "alpha": alpha, "pgd_steps": steps, "num_samples": t }
+    log.info(f"   ✅ Clean: {res['clean_acc']:.2f}% | FGSM: {res['fgsm_acc']:.2f}% | PGD-{steps}: {res['pgd_acc']:.2f}%")
+    return res

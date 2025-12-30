@@ -16,6 +16,40 @@ from ..utils import ensure_dir, get_logger
 
 
 @dataclass
+class GenerationConfig:
+    """数据生成配置 (Corruption / Domain / OOD)"""
+
+    model_path: str = "stabilityai/stable-diffusion-2-1"
+    batch_size: int = 16
+    samples_per_group: int = 1000
+    visualize: bool = True
+    num_vis: int = 10
+    styles: dict = field(
+        default_factory=lambda: {
+            "sketch": "pencil sketch drawing",
+            "painting": "oil painting artwork",
+            "cartoon": "cartoon illustration style",
+            "watercolor": "watercolor painting art",
+        }
+    )
+    strengths: List[float] = field(default_factory=lambda: [0.3, 0.5, 0.7])
+    ood_prompts: List[str] = field(
+        default_factory=lambda: [
+            "abstract colorful geometric patterns",
+            "underwater coral reef with tropical fish",
+            "close-up of delicious food dishes",
+            "city street at night with neon lights",
+            "cartoon character illustration",
+            "ancient stone ruins in jungle",
+            "microscopic view of cells",
+            "aurora borealis in night sky",
+            "vintage book pages with text",
+            "crystal formations in cave",
+        ]
+    )
+
+
+@dataclass
 class Config:
     """三阶段课程学习集成训练配置"""
 
@@ -140,6 +174,7 @@ class Config:
     fixed_ratio: float  # 固定遮挡比例 (仅 use_curriculum=False 时生效)
     fixed_prob: float  # 固定遮挡概率 (仅 use_curriculum=False 时生效)
     share_warmup_backbone: bool  # 是否在 warmup 后共享 backbone
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     # 自动计算/生成字段 (有默认值, 禁止人工初始化)
     save_dir: str = field(
@@ -180,67 +215,57 @@ class Config:
             num_models_per_gpu=1,
         )
 
+    @classmethod
+    def load_yaml(cls, yaml_path: str) -> tuple["Config", List["Experiment"], list]:
+        """加载层级配置: constants -> base -> generation"""
+        import yaml
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            d = yaml.safe_load(f) or {}
+
+        # 核心合并逻辑: Base 覆盖 Constants
+        merged = {**d.get("constants", {}), **d.get("base", {})}
+        cfg = cls(**merged)
+        
+        # 处理子配置与嵌套列表
+        if "generation" in d: cfg.generation = GenerationConfig(**d["generation"])
+        exps = [Experiment(**e) for e in d.get("experiments", [])]
+        return cfg, exps, d.get("eval_checkpoints", [])
+
     def __post_init__(self) -> None:
-        """初始化验证与自动配置"""
-        available_gpus = torch.cuda.device_count()
-        if available_gpus == 0:
-            raise RuntimeError("❌ 未检测到可用GPU")
-
-        self.gpu_ids = list(range(available_gpus))  # 使用所有可用 GPU
-
+        """配置校验与派生字段注入"""
+        self._validate_params()
+        self._setup_hardware()
         self._auto_configure_for_dataset()
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.save_dir = str(
-            Path(self.save_root) / f"{self.experiment_name or 'exp'}_{timestamp}"
-        )
+        
+        # 自动生成实验目录
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.save_dir = str(Path(self.save_root) / f"{self.experiment_name or 'exp'}_{ts}")
         ensure_dir(self.save_dir)
 
+    def _validate_params(self):
+        """严格的生产级校验"""
+        assert 0 < self.val_split < 1, "val_split 必须在 (0, 1) 之间"
+        assert self.batch_size > 0, "batch_size 必须为正整数"
+        assert self.lr > 0, "学习率必须为正"
+
+    def _setup_hardware(self):
+        """硬件资源探测"""
+        self.gpu_ids = list(range(torch.cuda.device_count()))
+        if not self.gpu_ids: raise RuntimeError("❌ No GPU found")
+
     def _auto_configure_for_dataset(self) -> None:
-        """根据数据集自动配置 num_classes 和 image_size"""
+        """数据集注入 (耦合隔离版)"""
         from ..datasets import DATASET_REGISTRY
+        name = self.dataset_name.lower()
+        if name not in DATASET_REGISTRY: raise ValueError(f"Unsupported: {name}")
 
-        dataset_name = self.dataset_name.lower()
-
-        if dataset_name not in DATASET_REGISTRY:
-            raise ValueError(f"❌ 不支持的数据集: {self.dataset_name}")
-
-        DatasetClass = DATASET_REGISTRY[dataset_name]
-        self.num_classes = DatasetClass.NUM_CLASSES
-        self.image_size = DatasetClass.IMAGE_SIZE
-        self.dataset_mean = DatasetClass.MEAN
-        self.dataset_std = DatasetClass.STD
-
-        # 如果需要 config_overrides，可以在 DatasetClass 中定义它
-        if hasattr(DatasetClass, "CONFIG_OVERRIDES"):
-            for k, v in DatasetClass.CONFIG_OVERRIDES.items():
-                setattr(self, k, v)
-
-    def save(self, path: Optional[str] = None) -> None:
-        """保存配置到 JSON 文件"""
-        save_path = Path(path) if path else Path(self.save_dir) / "config.json"
-        with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
-        get_logger().info(f"💾 Config saved to: {save_path}")
-
-    @classmethod
-    def load_yaml(cls, yaml_path: str) -> tuple["Config", list["Experiment"], list]:
-        """从 YAML 加载完整任务配置 (Config, experiments, eval_checkpoints)
-
-        配置合并顺序: constants (业界标准) -> base (用户自定义)
-        """
-        import yaml
-
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-
-        # 合并 constants 和 base，base 覆盖 constants
-        merged_cfg = {**data.get("constants", {}), **data.get("base", {})}
-        base_cfg = cls(**merged_cfg)
-        exps = [Experiment(**exp) for exp in data.get("experiments", [])]
-        ckpts = data.get("eval_checkpoints", [])  # 保持简单列表或按需包装
-
-        return base_cfg, exps, ckpts
+        ds = DATASET_REGISTRY[name]
+        self.num_classes, self.image_size = ds.NUM_CLASSES, ds.IMAGE_SIZE
+        self.dataset_mean, self.dataset_std = ds.MEAN, ds.STD
+        
+        # 按需覆盖数据集定义的特殊参数
+        for k, v in getattr(ds, "CONFIG_OVERRIDES", {}).items():
+            if hasattr(self, k): setattr(self, k, v)
 
 
 @dataclass

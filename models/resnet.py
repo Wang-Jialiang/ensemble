@@ -42,144 +42,75 @@ def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
 class BasicBlock(nn.Module):
     expansion: int = 1
 
-    def __init__(
-        self,
-        inplanes: int,
-        planes: int,
-        stride: int = 1,
-        downsample: Optional[nn.Module] = None,
-        groups: int = 1,
-        base_width: int = 64,
-        dilation: int = 1,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
-    ) -> None:
+    def __init__(self, inplanes, planes, stride=1, downsample=None, norm_layer=None):
         super().__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        if groups != 1 or base_width != 64:
-            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
-        if dilation > 1:
-            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-
-        self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes)
-        self.bn2 = norm_layer(planes)
-        self.downsample = downsample
-        self.stride = stride
+        norm = norm_layer or nn.BatchNorm2d
+        self.conv1, self.bn1 = conv3x3(inplanes, planes, stride), norm(planes)
+        self.conv2, self.bn2 = conv3x3(planes, planes), norm(planes)
+        self.relu, self.downsample = nn.ReLU(inplace=True), downsample
 
     def forward(self, x: Tensor) -> Tensor:
-        identity = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        out += identity
-        out = self.relu(out)
-        return out
+        identity = x if self.downsample is None else self.downsample(x)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.relu(out + identity)
 
 
 class Bottleneck(nn.Module):
     expansion: int = 4
 
-    def __init__(
-        self,
-        inplanes: int,
-        planes: int,
-        stride: int = 1,
-        downsample: Optional[nn.Module] = None,
-        groups: int = 1,
-        base_width: int = 64,
-        dilation: int = 1,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
-    ) -> None:
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1, base_width=64, dilation=1, norm_layer=None):
         super().__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        width = int(planes * (base_width / 64.0)) * groups
-
-        self.conv1 = conv1x1(inplanes, width)
-        self.bn1 = norm_layer(width)
-        self.conv2 = conv3x3(width, width, stride, groups, dilation)
-        self.bn2 = norm_layer(width)
-        self.conv3 = conv1x1(width, planes * self.expansion)
-        self.bn3 = norm_layer(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-        self.stride = stride
+        norm = norm_layer or nn.BatchNorm2d
+        w = int(planes * (base_width / 64.0)) * groups
+        self.conv1, self.bn1 = conv1x1(inplanes, w), norm(w)
+        self.conv2, self.bn2 = conv3x3(w, w, stride, groups, dilation), norm(w)
+        self.conv3, self.bn3 = conv1x1(w, planes * self.expansion), norm(planes * self.expansion)
+        self.relu, self.downsample = nn.ReLU(inplace=True), downsample
 
     def forward(self, x: Tensor) -> Tensor:
-        identity = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-        out = self.conv3(out)
-        out = self.bn3(out)
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        out += identity
-        out = self.relu(out)
-        return out
+        identity = x if self.downsample is None else self.downsample(x)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        return self.relu(out + identity)
 
 
 class ResNet(nn.Module):
     """自定义ResNet (适配CIFAR)"""
 
-    def __init__(
-        self,
-        block: Type[Union[BasicBlock, Bottleneck]],
-        layers: List[int],
-        num_classes: int = 1000,
-        zero_init_residual: bool = False,
-        groups: int = 1,
-        width_per_group: int = 64,
-        replace_stride_with_dilation: Optional[List[bool]] = None,
-        norm_layer: Optional[Callable[..., nn.Module]] = None,
-    ) -> None:
+    def __init__(self, block, layers, num_classes=1000, zero_init_residual=False, groups=1, width_per_group=64, replace_stride_with_dilation=None, norm_layer=None):
+        """ResNet 构造函数 (大纲化)"""
         super().__init__()
-        _log_api_usage_once(self)
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        self._norm_layer = norm_layer
+        self._norm_layer = norm_layer or nn.BatchNorm2d
+        self.inplanes, self.dilation = 64, 1
+        self.groups, self.base_width = groups, width_per_group
 
-        self.inplanes = 64
-        self.dilation = 1
-        if replace_stride_with_dilation is None:
-            replace_stride_with_dilation = [False, False, False]
-        if len(replace_stride_with_dilation) != 3:
-            raise ValueError(
-                "replace_stride_with_dilation should be None "
-                f"or a 3-element tuple, got {replace_stride_with_dilation}"
-            )
+        # 1. 构建 Backbone (适配 CIFAR: 3x3 stem, 无 maxpool)
+        self._build_backbone(block, layers, replace_stride_with_dilation)
 
-        self.groups = groups
-        self.base_width = width_per_group
-
-        # CIFAR适配: 3x3 conv, 无maxpool
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, padding=1, bias=False)
-        self.bn1 = norm_layer(self.inplanes)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(
-            block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0]
-        )
-        self.layer3 = self._make_layer(
-            block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1]
-        )
-        self.layer4 = self._make_layer(
-            block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2]
-        )
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # 2. 构建分类器
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
+        # 3. 参数初始化
+        self._init_params(zero_init_residual)
+
+    def _build_backbone(self, block, layers, replace_stride_with_dilation):
+        """纵向搭建特征提取网络"""
+        res = replace_stride_with_dilation or [False, False, False]
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, padding=1, bias=False)
+        self.bn1 = self._norm_layer(self.inplanes)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=res[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=res[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=res[2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def _init_params(self, zero_init_residual):
+        """应用默认 Kaiming 初始化"""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
@@ -187,15 +118,16 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-        # 注意: 初始化由 ModelFactory.create_model 的 init_method 参数统一处理
-        # 如果直接实例化 ResNet，需要手动调用 apply_init(model, "kaiming")
-
         if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, Bottleneck) and m.bn3.weight is not None:
-                    nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, BasicBlock) and m.bn2.weight is not None:
-                    nn.init.constant_(m.bn2.weight, 0)
+            self._zero_init_residual_weights()
+
+    def _zero_init_residual_weights(self):
+        """Residual 路径权值归零 (针对最后一层 BN)"""
+        for m in self.modules():
+            if isinstance(m, Bottleneck) and m.bn3.weight is not None:
+                nn.init.constant_(m.bn3.weight, 0)
+            elif isinstance(m, BasicBlock) and m.bn2.weight is not None:
+                nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(
         self,
@@ -272,23 +204,6 @@ class ResNet(nn.Module):
         return {k: v for k, v in self.state_dict().items() if not k.startswith("fc.")}
 
     def reinit_classifier(self, init_method: str = "kaiming") -> None:
-        """重新初始化 classifier head (fc 层)
-
-        Args:
-            init_method: 初始化方法 ("kaiming", "xavier", "orthogonal", "default")
-        """
-        if init_method == "kaiming":
-            nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
-        elif init_method == "xavier":
-            nn.init.xavier_normal_(self.fc.weight)
-        elif init_method == "orthogonal":
-            nn.init.orthogonal_(self.fc.weight)
-        elif init_method == "default":
-            # PyTorch 默认线性层初始化 (Kaiming Uniform 变体)
-            self.fc.reset_parameters()
-        else:
-            # 默认回退到 kaiming
-            nn.init.kaiming_normal_(self.fc.weight, mode="fan_out", nonlinearity="relu")
-
-        if self.fc.bias is not None:
-            nn.init.constant_(self.fc.bias, 0)
+        """重新初始化分类器 (fc 层)"""
+        from .factory import apply_init
+        apply_init(self.fc, init_method)

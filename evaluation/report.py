@@ -64,121 +64,75 @@ class ReportGenerator:
         return ""
 
     @staticmethod
-    def _evaluate_models(
-        models: List[nn.Module],
-        exp_name: str,
-        test_loader: DataLoader,
-        cfg: Config,
-        device: torch.device,
-        training_time: float = 0.0,
-        corruption_dataset: Optional["CorruptionDataset"] = None,
-        ood_dataset: Optional["OODDataset"] = None,
-        domain_dataset: Optional["DomainShiftDataset"] = None,
-        run_gradcam: bool = False,
-        run_adversarial: bool = True,
-    ) -> Dict[str, Any]:
-        """通用模型评估方法 - 核心评估逻辑"""
+    def _evaluate_models(models, exp_name, test_loader, cfg, device, training_time=0.0, **datasets) -> Dict[str, Any]:
+        """通用模型评估方法 - 生命周期钩子模式"""
         get_logger().info(f"\n📊 Evaluating: {exp_name}")
-        ensemble_fn = get_ensemble_fn(cfg)
+        res = {"experiment_name": exp_name, "training_time_seconds": training_time}
 
-        # ════════════════════════════════════════════════════════════════
-        # 标准评估 (Standard Metrics)
-        # ════════════════════════════════════════════════════════════════
+        # 1. 标准标准指标 (Acc, ECE, NLL)
+        res["standard_metrics"] = ReportGenerator._run_standard_eval(models, test_loader, cfg, device)
+        
+        # 2. 鲁棒性套件 (Corruption, OOD, Domain)
+        res.update(ReportGenerator._run_robustness_eval(models, cfg, test_loader, **datasets))
+        
+        # 3. 对抗性与可解释性分析
+        res.update(ReportGenerator._run_analysis_eval(models, cfg, test_loader, **datasets))
+        
+        return res
+
+    @staticmethod
+    def _run_standard_eval(models, loader, cfg, device):
         get_logger().info("   🔍 Standard evaluation...")
-        all_logits, all_targets = get_all_models_logits(models, test_loader, device)
-        metrics_calc = MetricsCalculator(cfg.num_classes, cfg.ece_n_bins)
-        standard_metrics = metrics_calc.calculate_all_metrics(
-            all_logits, all_targets, ensemble_fn=ensemble_fn
-        )
+        all_l, all_t = get_all_models_logits(models, loader, device)
+        m = MetricsCalculator(cfg.num_classes, cfg.ece_n_bins).calculate_all_metrics(all_l, all_t, get_ensemble_fn(cfg))
+        get_logger().info(f"   Ensemble Acc: {m['ensemble_acc']:.2f}% | ECE: {m['ece']:.4f}")
+        return m
 
-        get_logger().info(f"   Ensemble Acc:   {standard_metrics['ensemble_acc']:.2f}%")
-        get_logger().info(f"   ECE:            {standard_metrics['ece']:.4f}")
-
-        # ════════════════════════════════════════════════════════════════
-        # 鲁棒性评估 (Robustness Evaluation)
-        # ════════════════════════════════════════════════════════════════
-        corruption_results = None
-        if corruption_dataset is not None:
+    @staticmethod
+    def _run_robustness_eval(models, cfg, loader, **ds):
+        r = {"corruption_results": None, "ood_results": None, "domain_results": None}
+        
+        if ds.get("corruption_dataset"):
             get_logger().info("   🔍 Corruption evaluation...")
-            corruption_results = evaluate_corruption(
-                models, corruption_dataset, config=cfg
-            )
-
-        # OOD 评估
-        ood_results = None
-        if ood_dataset is not None:
+            r["corruption_results"] = evaluate_corruption(models, ds["corruption_dataset"], cfg)
+            
+        if ds.get("ood_dataset"):
             get_logger().info("   🔍 OOD detection evaluation...")
-            ood_loader = ood_dataset.get_loader(config=cfg)
-            ood_results = evaluate_ood(
-                models, test_loader, ood_loader, ood_name=ood_dataset.name
-            )
-
-        # Domain Shift 评估 (遍历所有 style × strength 组合)
-        domain_results = None
-        if domain_dataset is not None:
+            r["ood_results"] = evaluate_ood(models, loader, ds["ood_dataset"].get_loader(cfg), ds["ood_dataset"].name)
+            
+        if ds.get("domain_dataset"):
             get_logger().info("   🔍 Domain shift evaluation...")
-            domain_results = {"by_style_strength": {}, "overall_avg": 0.0}
-            all_accs = []
+            r["domain_results"] = ReportGenerator._evaluate_domain_suite(models, ds["domain_dataset"], cfg)
+            
+        return r
 
-            for style in domain_dataset.STYLES:
-                for strength in domain_dataset.STRENGTHS:
-                    try:
-                        domain_loader = domain_dataset.get_loader(style, strength, cfg)
-                        result = evaluate_domain_shift(
-                            models,
-                            domain_loader,
-                            domain_name=f"{style}_{strength}",
-                            num_classes=cfg.num_classes,
-                        )
-                        key = f"{style}_{strength}"
-                        domain_results["by_style_strength"][key] = result
-                        all_accs.append(result["domain_acc"])
-                    except FileNotFoundError:
-                        get_logger().warning(
-                            f"      跳过未生成的组合: {style}/{strength}"
-                        )
-
-            if all_accs:
-                domain_results["overall_avg"] = sum(all_accs) / len(all_accs)
-                get_logger().info(
-                    f"   ✅ Domain Overall Avg: {domain_results['overall_avg']:.2f}%"
-                )
-
-        # 对抗鲁棒性评估
-        adversarial_results = None
-        if run_adversarial:
+    @staticmethod
+    def _run_analysis_eval(models, cfg, loader, **ds):
+        a = {"adversarial_results": None, "gradcam_metrics": None}
+        if ds.get("run_adversarial", True):
             get_logger().info("   🔍 Adversarial evaluation...")
-            adversarial_results = evaluate_adversarial(
-                models,
-                test_loader,
-                eps=cfg.adv_eps,
-                alpha=cfg.adv_alpha,
-                pgd_steps=cfg.adv_pgd_steps,
-                dataset_name=cfg.dataset_name,
-            )
-
-        # ════════════════════════════════════════════════════════════════
-        # 可解释性分析 (Grad-CAM)
-        # ════════════════════════════════════════════════════════════════
-        gradcam_metrics = None
-        if run_gradcam:
+            a["adversarial_results"] = evaluate_adversarial(models, loader, cfg.adv_eps, cfg.adv_alpha, cfg.adv_pgd_steps, cfg.dataset_name)
+        
+        if ds.get("run_gradcam", False):
             get_logger().info("   🔍 Grad-CAM analysis...")
-            workers = [ModelListWrapper(models)]
-            gradcam_analyzer = GradCAMAnalyzer(cfg)
-            gradcam_metrics = gradcam_analyzer.analyze_ensemble_quality(
-                workers, test_loader, num_samples=50, image_size=cfg.image_size
-            )
+            a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality([ModelListWrapper(models)], loader, 50, cfg.image_size)
+        return a
 
-        return {
-            "experiment_name": exp_name,
-            "training_time_seconds": training_time,
-            "standard_metrics": standard_metrics,
-            "corruption_results": corruption_results,
-            "ood_results": ood_results,
-            "domain_results": domain_results,
-            "adversarial_results": adversarial_results,
-            "gradcam_metrics": gradcam_metrics,
-        }
+    @staticmethod
+    def _evaluate_domain_suite(models, dataset, cfg):
+        """执行全风格组合的 Domain Shift 评估"""
+        res = {"by_style_strength": {}, "overall_avg": 0.0}
+        accs = []
+        for s in dataset.STYLES:
+            for st in dataset.STRENGTHS:
+                try:
+                    loader = dataset.get_loader(s, st, cfg)
+                    m = evaluate_domain_shift(models, loader, f"{s}_{st}", cfg.num_classes)
+                    res["by_style_strength"][f"{s}_{st}"] = m
+                    accs.append(m["domain_acc"])
+                except FileNotFoundError: continue
+        if accs: res["overall_avg"] = sum(accs) / len(accs)
+        return res
 
     @staticmethod
     def _evaluate_trainer(
@@ -205,126 +159,60 @@ class ReportGenerator:
 
     @classmethod
     def _generate_report(cls, results: Dict[str, Any]) -> str:
-        """生成报告字符串"""
+        """生成文本报告 (大纲化渲染)"""
         lines = []
+        exps = list(results.keys())
+        
+        # 1. 绘制 Header
+        lines.append("="*115)
+        lines.append(f"📊 EXPERIMENT COMPARISON" if len(exps)>1 else f"📊 RESULTS: {exps[0]}")
+        lines.append("="*115)
 
-        def log(s=""):
-            lines.append(str(s))
-
-        exp_names = list(results.keys())
-        is_single = len(exp_names) == 1
-
-        # 标题
-        log("=" * 115)
-        if is_single:
-            log(f"📊 EXPERIMENT RESULTS: {exp_names[0]}")
-        else:
-            log("📊 EXPERIMENTAL RESULTS COMPARISON")
-            log(
-                "   🥇 = Best, 🥈 = Second Best | ↑ = Higher is better, ↓ = Lower is better"
-            )
-        log("=" * 115)
-
-        # 表格
-        log("\n🎯 Performance Metrics")
-        log("-" * 115)
-        log(
-            f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10} | {'Time':<12}"
-        )
-        log("-" * 115)
-
-        acc_vals = [
-            results[n].get("standard_metrics", {}).get("ensemble_acc", 0)
-            for n in exp_names
-        ]
-
-        for name in exp_names:
-            m = results[name].get("standard_metrics", {})
-            t = format_duration(
-                results[name].get(
-                    "training_time_seconds", results[name].get("training_time", 0)
-                )
-            )
-            acc = m.get("ensemble_acc", 0)
-            mark = cls._get_rank_marker(acc, acc_vals, True)
-            log(
-                f"{name:<25} | {acc:<7.2f}{mark:<3} | {m.get('avg_individual_acc', 0):<10.2f} | "
-                f"{m.get('oracle_acc', 0):<10.2f} | {m.get('ece', 0):<10.4f} | {m.get('nll', 0):<10.4f} | {t:<12}"
-            )
-        log("-" * 115)
-
-        # 详细指标 (每个实验依次展示)
-        log("\n📋 Detailed Metrics")
-        log("=" * 115)
-
-        for name in exp_names:
-            m = results[name].get("standard_metrics", {})
-            log(f"\n🔹 {name}")
-            log("-" * 40)
-
-            # Diversity
-            log("   🔀 Diversity & Confidence")
-            log(
-                f"      Disagreement: {m.get('disagreement', 0):.2f}%  |  JS散度: {m.get('js_divergence', 0):.4f}  |  Spearman: {m.get('spearman_correlation', 1.0):.4f}"
-            )
-            log(
-                f"      Confidence: avg={m.get('avg_confidence', 0):.4f}, correct={m.get('avg_correct_confidence', 0):.4f}, incorrect={m.get('avg_incorrect_confidence', 0):.4f}"
-            )
-
-            # Fairness
-            log("\n   ⚖️ Fairness")
-            log(
-                f"      Balanced Acc: {m.get('balanced_acc', 0):.2f}%  |  Disparity: {m.get('acc_disparity', 0):.2f}%  |  Score: {m.get('fairness_score', 0):.2f}"
-            )
-            log("-" * 40)
-
-        # Corruption
-        has_corruption = any(results[n].get("corruption_results") for n in exp_names)
-        if has_corruption:
-            log("\n🧪 Corruption Robustness")
-            log("-" * 60)
-            overall_vals = [
-                results[n].get("corruption_results", {}).get("overall_avg", 0)
-                for n in exp_names
-                if results[n].get("corruption_results")
-            ]
-            for name in exp_names:
-                c = results[name].get("corruption_results", {})
-                if c and "overall_avg" in c:
-                    val = c["overall_avg"]
-                    mark = cls._get_rank_marker(val, overall_vals, True)
-                    log(f"   {name:<25} | Overall: {val:.2f}%{mark}")
-            log("-" * 60)
-
-        # Adversarial Robustness
-        has_adversarial = any(results[n].get("adversarial_results") for n in exp_names)
-        if has_adversarial:
-            log("\n🗡️ Adversarial Robustness")
-            log("-" * 80)
-            log(
-                f"   {'Experiment':<25} | {'Clean↑':<10} | {'FGSM↑':<10} | {'PGD↑':<10} | {'ε':<10}"
-            )
-            log("-" * 80)
-            pgd_vals = [
-                results[n].get("adversarial_results", {}).get("pgd_acc", 0)
-                for n in exp_names
-                if results[n].get("adversarial_results")
-            ]
-            for name in exp_names:
-                adv = results[name].get("adversarial_results", {})
-                if adv:
-                    clean = adv.get("clean_acc", 0)
-                    fgsm = adv.get("fgsm_acc", 0)
-                    pgd = adv.get("pgd_acc", 0)
-                    eps = adv.get("eps_255", 8)
-                    mark = cls._get_rank_marker(pgd, pgd_vals, True)
-                    log(
-                        f"   {name:<25} | {clean:<10.2f} | {fgsm:<10.2f} | {pgd:<7.2f}{mark:<3} | {eps:.0f}/255"
-                    )
-            log("-" * 80)
-
-        log("\n" + "=" * 115)
+        # 2. 核心性能对比表
+        lines.extend(cls._format_perf_table(results, exps))
+        
+        # 3. 详细子系统报告
+        for name in exps: 
+            lines.extend(cls._format_detailed_exp(results[name]))
+            
+        # 4. 鲁棒性专门板块
+        lines.extend(cls._format_robustness_sections(results, exps))
+        
         return "\n".join(lines)
+
+    @classmethod
+    def _format_perf_table(cls, results, names):
+        t = ["\n🎯 Performance Metrics", "-"*115, 
+             f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10} | {'Time':<12}",
+             "-"*115]
+        accs = [results[n].get("standard_metrics", {}).get("ensemble_acc", 0) for n in names]
+        for n in names:
+            m = results[n].get("standard_metrics", {})
+            tm = format_duration(results[n].get("training_time_seconds", 0))
+            mark = cls._get_rank_marker(m.get("ensemble_acc", 0), accs, True)
+            t.append(f"{n:<25} | {m.get('ensemble_acc', 0):<7.2f}{mark:<3} | {m.get('avg_individual_acc', 0):<10.2f} | "
+                     f"{m.get('oracle_acc', 0):<10.2f} | {m.get('ece', 0):<10.4f} | {m.get('nll', 0):<10.4f} | {tm:<12}")
+        t.append("-" * 115)
+        return t
+
+    @classmethod
+    def _format_detailed_exp(cls, r):
+        m = r.get("standard_metrics", {})
+        return ["\n📋 Detailed Metrics", "="*115, f"\n🔹 {r['experiment_name']}", "-"*40,
+                f"   🔀 Div: Dis={m.get('disagreement', 0):.2f}% | JS={m.get('js_divergence', 0):.4f} | Spearman={m.get('spearman_correlation', 1.0):.4f}",
+                f"   ⚖️ Fair: BalAcc={m.get('balanced_acc', 0):.2f}% | Gini={m.get('acc_gini_coef', 0):.4f} | Score={m.get('fairness_score', 0):.2f}",
+                "-" * 40]
+
+    @classmethod
+    def _format_robustness_sections(cls, results, names):
+        s = ["\n🧪 Robustness Summary"]
+        for n in names:
+            r = results[n]
+            corr = r.get("corruption_results", {}).get("overall_avg", 0)
+            pgd = r.get("adversarial_results", {}).get("pgd_acc", 0)
+            ood = r.get("ood_results", {}).get("auc_roc", 0)
+            s.append(f"   {n:<25} | Corr: {corr:2.2f}% | PGD: {pgd:2.2f}% | OOD AUC: {ood:.4f}")
+        return s
 
     @classmethod
     def _save_and_print(cls, results: Dict[str, Dict], save_dir: str):
