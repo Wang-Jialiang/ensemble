@@ -3,7 +3,7 @@
 Grad-CAM 分析模块
 ================================================================================
 
-包含: get_target_layer, GradCAM, GradCAMAnalyzer, ModelListWrapper
+包含: GradCAM, GradCAMAnalyzer, ModelListWrapper
 """
 
 from typing import Any, Dict, List
@@ -19,7 +19,7 @@ from ..utils import get_logger
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
+def _get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
     """获取模型的目标层用于Grad-CAM
 
     根据模型架构自动确定适合用于Grad-CAM可视化的目标层。
@@ -67,7 +67,7 @@ class GradCAM:
 
         Args:
             model: PyTorch模型
-            target_layer: 用于生成CAM的目标层 (使用get_target_layer获取)
+            target_layer: 用于生成CAM的目标层 (使用_get_target_layer获取)
         """
         self.model = model
         self.target_layer = target_layer
@@ -186,7 +186,7 @@ class GradCAMAnalyzer:
             for model_idx, model in enumerate(worker.models):
                 model.eval()
                 device = next(model.parameters()).device
-                target_layer = get_target_layer(model, self.model_name)
+                target_layer = _get_target_layer(model, self.model_name)
                 gradcam = GradCAM(model, target_layer)
 
                 model_cams = []

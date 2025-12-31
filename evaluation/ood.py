@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..utils import get_logger
-from .inference import get_models_from_source
+from .inference import get_all_models_logits, get_models_from_source
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ OOD 检测评估                                                                  ║

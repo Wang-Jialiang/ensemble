@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from ..utils import get_logger
 from .inference import get_all_models_logits, get_models_from_source
 from .metrics import MetricsCalculator
-from .strategies import ENSEMBLE_STRATEGIES
+from .strategies import get_ensemble_fn
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Domain Shift (域偏移) 评估                                                    ║
@@ -25,6 +25,7 @@ def evaluate_domain_shift(
     domain_loader: DataLoader,
     domain_name: str = "Domain",
     num_classes: int = 10,
+    cfg: Any = None,
     logger: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
@@ -47,7 +48,7 @@ def evaluate_domain_shift(
 
     models, device = get_models_from_source(trainer_or_models)
     calculator = MetricsCalculator(num_classes=num_classes)
-    ensemble_fn = ENSEMBLE_STRATEGIES["mean"]
+    ensemble_fn = get_ensemble_fn(cfg)
 
     # 获取所有模型的 logits
     all_logits, targets = get_all_models_logits(models, domain_loader, device)

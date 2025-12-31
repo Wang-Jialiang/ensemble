@@ -23,7 +23,6 @@ from ..config import Config
 from ..utils import console, ensure_dir, format_duration, get_logger
 from .optimization import EarlyStopping
 from .worker import GPUWorker, HistorySaver
-from ..evaluation.strategies import get_ensemble_fn
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Checkpoint Mixin                                                           ║
@@ -339,6 +338,8 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
     def _collect_ensemble_logits(self, inputs, device):
         """从分布式 Workers 中收集并聚合预测结果"""
+        from ..evaluation.strategies import get_ensemble_fn  # 延迟导入，避免循环依赖
+        
         logits_list = [w.predict_batch(inputs).to(device) for w in self.workers]
         stacked = torch.stack(logits_list)
         ensemble_fn = get_ensemble_fn(self.cfg)

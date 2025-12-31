@@ -6,17 +6,10 @@
 包含: BasePreloadedDataset 基类
 """
 
-import os
-import ssl
-
 import torch
 from torch.utils.data import Dataset
 
 from ..utils import get_logger
-
-# SSL 证书验证修复 (可通过环境变量 DISABLE_SSL_VERIFY=1 启用)
-if os.environ.get("DISABLE_SSL_VERIFY", "0") == "1":
-    ssl._create_default_https_context = ssl._create_unverified_context
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗

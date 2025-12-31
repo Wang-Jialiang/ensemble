@@ -47,7 +47,6 @@ from .gradcam import (
     GradCAM,
     GradCAMAnalyzer,
     ModelListWrapper,
-    get_target_layer,
 )
 
 # 模型推理
@@ -99,7 +98,6 @@ __all__ = [
     # OOD
     "evaluate_ood",
     # GradCAM
-    "get_target_layer",
     "GradCAM",
     "GradCAMAnalyzer",
     "ModelListWrapper",

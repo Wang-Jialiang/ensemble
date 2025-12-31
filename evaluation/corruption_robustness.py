@@ -9,8 +9,8 @@ Corruption 鲁棒性评估模块
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
-    from ...config.core import Config
-    from ...datasets.robustness.corruption import CorruptionDataset
+    from ..config.core import Config
+    from ..datasets.robustness.corruption import CorruptionDataset
 
 import numpy as np
 

@@ -65,10 +65,11 @@ def pgd_attack(model, images, labels, eps, alpha, steps, mean, std) -> torch.Ten
 
 
 def evaluate_adversarial(
-    trainer_or_models, loader, eps, alpha, steps, dataset, logger=None
+    trainer_or_models, loader, eps, alpha, steps, dataset, cfg=None, logger=None
 ) -> Dict:
     """集成对抗鲁棒性评估 (大纲化)"""
     from tqdm import tqdm
+    from .strategies import get_ensemble_fn
 
     log = logger or get_logger()
     log.info(f"\n🗡️ Adversarial Eval (ε={eps * 255:.1f}/255, Steps={steps})")
@@ -76,8 +77,9 @@ def evaluate_adversarial(
     models, device = get_models_from_source(trainer_or_models)
     mean, std = _get_dataset_norm(dataset, device)
 
-    # 建立集成攻击外壳
-    ens_model = _EnsembleProxy(models).to(device).eval()
+    # 建立集成攻击外壳（使用配置的集成策略）
+    ensemble_fn = get_ensemble_fn(cfg) if cfg else None
+    ens_model = _EnsembleProxy(models, ensemble_fn).to(device).eval()
     stats = {"total": 0, "clean": 0, "fgsm": 0, "pgd": 0}
 
     pbar = tqdm(loader, desc="Adversarial", leave=False)
@@ -109,12 +111,14 @@ def evaluate_adversarial(
 
 
 class _EnsembleProxy(nn.Module):
-    def __init__(self, models):
+    def __init__(self, models, ensemble_fn=None):
         super().__init__()
         self.models = nn.ModuleList(models)
+        self._ensemble_fn = ensemble_fn or (lambda x: x.mean(0))
 
     def forward(self, x):
-        return torch.stack([m(x) for m in self.models]).mean(0)
+        stacked = torch.stack([m(x) for m in self.models])
+        return self._ensemble_fn(stacked)
 
 
 def _get_dataset_norm(name, device):
