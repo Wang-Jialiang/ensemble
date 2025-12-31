@@ -115,7 +115,7 @@ class ReportGenerator:
         
         if ds.get("run_gradcam", False):
             get_logger().info("   🔍 Grad-CAM analysis...")
-            a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality([ModelListWrapper(models)], loader, 50, cfg.image_size)
+            a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality([ModelListWrapper(models)], loader, cfg.gradcam_num_samples, cfg.image_size)
         return a
 
     @staticmethod
@@ -359,8 +359,8 @@ class ReportGenerator:
                         models[0],
                         test_loader,
                         device,
-                        distance=1.0,
-                        steps=20,  # 减少步数以加快计算
+                        distance=cfg.landscape_distance,
+                        steps=cfg.landscape_steps_2d,
                         filename=f"{exp_name}_landscape_surface.png",
                         model_name=f"{exp_name}_M1",
                     )

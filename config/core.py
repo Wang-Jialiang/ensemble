@@ -18,17 +18,26 @@ from ..utils import ensure_dir
 class GenerationConfig:
     """数据生成配置 (Corruption / Domain / OOD) - SDXL Lightning"""
 
-    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0"  # SDXL 基础模型
-    lightning_repo: str = "ByteDance/SDXL-Lightning"  # Lightning UNet 仓库
-    lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors"  # 4-step 检查点
+    base_model: str = ""  # SDXL 基础模型 (由 yaml 填充)
+    lightning_repo: str = ""  # Lightning UNet 仓库
+    lightning_ckpt: str = ""  # 4-step 检查点
     num_steps: int = 4  # 推理步数 (2/4/8)
-    batch_size: int = 24  # A6000 推荐
-    samples_per_group: int = 1000
+    batch_size: int = 12  # 与 yaml 同步
+    samples_per_group: int = 500  # 与 yaml 同步
     visualize: bool = True
-    num_vis: int = 10
+    num_vis: int = 5  # 与 yaml 同步
+
+    # SDXL 生成参数
+    sdxl_height: int = 1024  # Text2Img 原始输出高度
+    sdxl_width: int = 1024  # Text2Img 原始输出宽度
+    img2img_size: int = 512  # Img2Img 中间处理尺寸
+    guidance_scale_img2img: float = 4.5  # Img2Img CFG
+    guidance_scale_text2img: float = 0.0  # Text2Img CFG
+
     styles: dict = field(default_factory=dict)  # 由 default.yaml 填充
     strengths: List[float] = field(default_factory=list)  # 由 default.yaml 填充
     ood_prompts: List[str] = field(default_factory=list)  # 由 default.yaml 填充
+    vis_corruptions: List[str] = field(default_factory=list)  # 由 default.yaml 填充
 
 
 @dataclass
@@ -98,6 +107,8 @@ class Config:
     save_every_n_epochs: int  # 每 N 轮保存一次检查点
     keep_last_n_checkpoints: int  # 保留最近 N 个检查点
     use_tensorboard: bool  # 是否启用 TensorBoard 日志
+    use_wandb: bool  # 是否启用 Weights & Biases 日志
+    wandb_project: str  # wandb 项目名称
     log_level: str  # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
 
     # ==========================================================================
@@ -136,7 +147,11 @@ class Config:
     # ==========================================================================
     # [评估专用] 可视化参数
     # ==========================================================================
-    plot_dpi: int  # 图表保存 DPI (默认 150)
+    plot_dpi: int  # 图表保存 DPI (默认 300)
+    landscape_steps_1d: int  # Loss Landscape 1D 插值步数
+    landscape_steps_2d: int  # Loss Landscape 2D 采样步数
+    landscape_distance: float  # Loss Landscape 2D 采样距离
+    gradcam_num_samples: int  # Grad-CAM 分析样本数
 
     # ==========================================================================
     # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用

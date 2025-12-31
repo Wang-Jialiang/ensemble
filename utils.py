@@ -14,19 +14,29 @@ from typing import Optional, Union
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.traceback import install
+
+# 全局 Console 对象
+console = Console()
+# 自动接管异常显示 (带局部变量显示)
+install(show_locals=True)
+
+
 def get_logger(level: int = logging.INFO, file: str = None) -> logging.Logger:
-    """获取单例 NDE Logger"""
+    """获取单例 NDE Logger (强制集成 Rich)"""
     log = logging.getLogger("NDE")
-    if log.handlers: return log
+    if log.handlers:
+        return log
 
     log.setLevel(level)
-    fmt = logging.Formatter("%(message)s")
-    
-    # 终端输出
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt); log.addHandler(ch)
 
-    # 文件输出 (可选)
+    # 终端输出: 强制使用 RichHandler
+    rh = RichHandler(console=console, rich_tracebacks=True, show_path=True)
+    log.addHandler(rh)
+
+    # 文件输出 (保持标准格式)
     if file:
         fh = logging.FileHandler(file, encoding="utf-8")
         fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))

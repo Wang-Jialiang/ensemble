@@ -71,21 +71,13 @@ class GPUWorker:
         if self._use_model_level:
             self.augmentation.init_model_seeds(num_models=self.num_models)
 
-    def _create_augmentation(self, method: str) -> AugmentationMethod:
-        """创建增强方法"""
-        if method not in AUGMENTATION_REGISTRY:
-            raise ValueError(
-                f"不支持的增强方法: {method}. 支持: {list(AUGMENTATION_REGISTRY.keys())}"
-            )
-        return AUGMENTATION_REGISTRY[method](self.device, self.cfg)
-
-    def precompute_masks(self, num_masks: int, target_ratio: float):
+    def precompute_masks(self, target_ratio: float):
         """预计算mask（仅样本级增强使用）
 
         样本级增强：每个 epoch 用当前 ratio 预计算共享 mask 池
         模型级增强：跳过，因为使用固定 seed 在 apply 时动态生成
         """
-        if self.use_model_level_aug:
+        if self._use_model_level:
             return
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)

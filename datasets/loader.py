@@ -43,7 +43,9 @@ def _get_dataset_class(name):
 def _prepare_standard_loaders(cfg, DatasetClass):
     """执行数据集划分并创建标准 DataLoaders"""
     # 1. 实例化数据集 (处理 EuroSAT 等非官方划分情况)
-    extra = {"test_split": cfg.test_split} if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True) else {}
+    extra = {}
+    if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
+        extra = {"test_split": cfg.test_split, "seed": cfg.seed}
     train_full = DatasetClass(root=cfg.data_root, train=True, **extra)
     test_ds = DatasetClass(root=cfg.data_root, train=False, **extra)
 

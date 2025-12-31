@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from ..config import Config
-from ..utils import ensure_dir, format_duration, get_logger
+from ..utils import console, ensure_dir, format_duration, get_logger
 from .optimization import EarlyStopping
 from .worker import GPUWorker, HistorySaver
 
@@ -145,6 +145,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         # 4. 初始化状态跟踪变量
         self._init_tracking_structures()
+        self._log_training_config()  # 使用 Rich 展示配置汇总
         cfg.save()  # 持久化当前运行配置
 
     def _init_hardware_optimizations(self):
@@ -155,16 +156,50 @@ class StagedEnsembleTrainer(CheckpointMixin):
         torch.backends.cudnn.benchmark = True
 
     def _init_monitoring_tools(self):
-        """初始化 TensorBoard 与其它观测工具"""
+        """初始化 TensorBoard 与 wandb 观测工具"""
+        # TensorBoard
         self.writer = None
         if self.cfg.use_tensorboard:
             log_dir = Path(self.cfg.save_dir) / "tensorboard" / self.name
             self.writer = SummaryWriter(str(log_dir))
+        
+        # Weights & Biases
+        self.wandb_run = None
+        if getattr(self.cfg, 'use_wandb', False):
+            try:
+                import wandb
+                self.wandb_run = wandb.init(
+                    project=getattr(self.cfg, 'wandb_project', 'ensemble'),
+                    name=self.name,
+                    config=self._get_wandb_config(),
+                    reinit=True,
+                )
+            except ImportError:
+                self.logger.warning("⚠️ wandb not installed, skipping")
+            except Exception as e:
+                self.logger.warning(f"⚠️ wandb init failed: {e}")
+    
+    def _get_wandb_config(self) -> dict:
+        """提取配置用于 wandb"""
+        return {
+            "model": self.cfg.model_name,
+            "dataset": self.cfg.dataset_name,
+            "batch_size": self.cfg.batch_size,
+            "lr": self.cfg.lr,
+            "optimizer": self.cfg.optimizer,
+            "augmentation": self.augmentation_method,
+            "use_curriculum": self.use_curriculum,
+            "total_epochs": self.cfg.total_epochs,
+        }
 
     def _init_tracking_structures(self):
         """初始化训练历史、早停与记录器"""
         self.history = {k: [] for k in ["epoch", "stage", "train_loss", "val_loss", "val_acc", "mask_ratio", "mask_prob", "lr", "epoch_time"]}
-        self.early_stopping = EarlyStopping(patience=self.cfg.early_stopping_patience, mode="min")
+        self.early_stopping = EarlyStopping(
+            patience=self.cfg.early_stopping_patience, 
+            metrics={"val_loss": "min", "val_acc": "max"},
+            criteria="any"
+        )
         self._best_val_loss, self._best_epoch = float("inf"), 0
         self.history_saver = HistorySaver(self.cfg.save_dir)
 
@@ -233,29 +268,44 @@ class StagedEnsembleTrainer(CheckpointMixin):
         criterion = nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
 
         # 2. 预热 Workers (如预计算 Mask 池)
-        for w in self.workers: w.precompute_masks(self.cfg.mask_pool_size, m_ratio)
+        for w in self.workers: w.precompute_masks(m_ratio)
 
         # 3. 执行批次迭代
         return self._run_batch_iteration(train_loader, epoch, criterion, m_ratio, m_prob, use_mask)
 
     def _run_batch_iteration(self, loader, epoch, criterion, m_ratio, m_prob, use_mask):
-        """具体执行张量流动与梯度更新"""
+        """具体执行张量流动与梯度更新 (使用 Rich Progress)"""
         total_loss, n = 0.0, 0
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1} [LR={self.workers[0].get_lr():.6f}]")
+        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
-        for inputs, targets in pbar:
-            # 异步分发任务
-            for w in self.workers: 
-                w.train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask)
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("| Loss: [bold magenta]{task.fields[loss]}"),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task(
+                f"Epoch {epoch+1:3d} [LR={self.workers[0].get_lr():.6f}]",
+                total=len(loader),
+                loss="0.0000",
+            )
 
-            # 同步并聚合损失
-            batch_loss = sum(w.synchronize() for w in self.workers) / len(self.workers)
-            total_loss += batch_loss
-            n += 1
-            pbar.set_postfix({"loss": f"{total_loss/n:.4f}"})
+            for inputs, targets in loader:
+                # 异步分发任务
+                for w in self.workers:
+                    w.train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask)
+
+                # 同步并聚合损失
+                batch_loss = sum(w.synchronize() for w in self.workers) / len(self.workers)
+                total_loss += batch_loss
+                n += 1
+                progress.update(task_id, advance=1, loss=f"{total_loss/n:.4f}")
 
         # 步进调度器
-        for w in self.workers: w.step_schedulers()
+        for w in self.workers:
+            w.step_schedulers()
         return total_loss / n
 
     @torch.no_grad()
@@ -297,7 +347,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 
                 # 3. 生命周期钩子: 记录、持久化、早停
                 self._handle_epoch_post(epoch, stats)
-                if self.early_stopping(stats["val_loss"], epoch): break
+                if self.early_stopping(stats, epoch): break
 
             self._finalize_training(start_time)
 
@@ -306,6 +356,9 @@ class StagedEnsembleTrainer(CheckpointMixin):
             raise
         finally:
             if self.writer: self.writer.close()
+            if self.wandb_run:
+                import wandb
+                wandb.finish()
 
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
@@ -361,9 +414,26 @@ class StagedEnsembleTrainer(CheckpointMixin):
         """同步历史记录与可视化工具"""
         for k, v in stats.items(): self.history[k].append(v)
         self.history["epoch"].append(epoch + 1)
+        
+        # TensorBoard
         if self.writer:
+            self.writer.add_scalar("Loss/Train", stats["train_loss"], epoch)
             self.writer.add_scalar("Loss/Val", stats["val_loss"], epoch)
             self.writer.add_scalar("Acc/Val", stats["val_acc"], epoch)
+            self.writer.add_scalar("LR", stats["lr"], epoch)
+        
+        # wandb
+        if self.wandb_run:
+            import wandb
+            wandb.log({
+                "epoch": epoch + 1,
+                "train_loss": stats["train_loss"],
+                "val_loss": stats["val_loss"],
+                "val_acc": stats["val_acc"],
+                "lr": stats["lr"],
+                "mask_ratio": stats["mask_ratio"],
+                "mask_prob": stats["mask_prob"],
+            })
 
     def _log_epoch_summary(self, epoch, stats):
         _, s_name, _, _, _ = self._get_stage_info(epoch)
@@ -396,6 +466,46 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         self.logger.info(
             "🔄 Shared warmup backbone to all models, re-initialized classifier heads"
+        )
+
+    def _log_training_config(self):
+        """展示精美的训练配置表格"""
+        if console is None:
+            return
+
+        from rich.panel import Panel
+        from rich.table import Table
+
+        table = Table(box=None, padding=(0, 2))
+        table.add_column("Property", style="bold cyan")
+        table.add_column("Value", style="magenta")
+
+        # 基础信息
+        table.add_row("Experiment", self.name)
+        table.add_row("Model", self.cfg.model_name)
+        table.add_row("Dataset", self.cfg.dataset_name)
+        table.add_row("Ensemble Size", str(len(self.get_models())))
+        table.add_row("Augmentation", self.augmentation_method)
+        table.add_section()
+
+        # 核心参数
+        table.add_row("Batch Size", str(self.cfg.batch_size))
+        table.add_row("Learning Rate", f"{self.cfg.lr:.6f}")
+        table.add_row("Optimizer", self.cfg.optimizer)
+        table.add_row("Scheduler", self.cfg.scheduler)
+        table.add_section()
+
+        # 硬件信息
+        table.add_row("GPU IDs", str(self.cfg.gpu_ids))
+        table.add_row("Mixed Precision", "ON" if self.cfg.use_amp else "OFF")
+
+        console.print(
+            Panel(
+                table,
+                title="[bold green]Training Configuration Summary[/bold green]",
+                expand=False,
+                border_style="green",
+            )
         )
 
 

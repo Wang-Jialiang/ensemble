@@ -15,13 +15,24 @@
 """
 
 import argparse
+import multiprocessing
+import os
 import warnings
 from pathlib import Path
 from typing import Optional
 
+# 强制使用 spawn 启动方法，解决 CUDA 在 fork 子进程中无法重新初始化的问题
+# 必须在任何 CUDA 调用之前设置
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass  # 已经设置过了
+
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+
+from ...utils import console
 
 
 def patch_dependencies():
@@ -58,6 +69,10 @@ from safetensors.torch import load_file
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 warnings.filterwarnings("ignore", category=UserWarning, module="imagecorruptions")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="imagecorruptions")
+warnings.filterwarnings("ignore", "invalid value encountered in divide")
+warnings.filterwarnings("ignore", "invalid value encountered in cast")
+warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
 
 try:
     from diffusers import (
@@ -112,8 +127,8 @@ def save_visual_comparison(
 # =============================================================================
 
 
-def _prepare_pil_batch(images_np: np.ndarray, target_size: int = 1024):
-    """将 numpy 批量图像转换为 PIL 格式并统一缩放"""
+def _prepare_pil_batch(images_np: np.ndarray, target_size: int = 512):
+    """将 numpy 批量图像转换为 PIL 格式并统一缩放（512 对 CIFAR-10 足够）"""
     return [
         Image.fromarray(img.astype(np.uint8)).resize(
             (target_size, target_size), Image.LANCZOS
@@ -225,63 +240,123 @@ class LightningPipelineLoader:
     def get_text2img(
         cls, device: str, base_model: str, repo: str, ckpt: str
     ) -> "StableDiffusionXLPipeline":
-        """获取 Text2Img Pipeline (带缓存)"""
-        if device not in cls._text2img_cache:
-            get_logger().info(f"📥 [{device}] 加载 SDXL Lightning Text2Img...")
-            unet = cls._load_unet(device, base_model, repo, ckpt)
-            pipe = StableDiffusionXLPipeline.from_pretrained(
-                base_model, unet=unet, torch_dtype=torch.float16, variant="fp16"
-            ).to(device)
-            pipe.scheduler = EulerDiscreteScheduler.from_config(
-                pipe.scheduler.config, timestep_spacing="trailing"
-            )
-            pipe.set_progress_bar_config(disable=True)
-            cls._try_enable_optimizations(pipe)
-            cls._text2img_cache[device] = pipe
-        return cls._text2img_cache[device]
+        """获取 Text2Img Pipeline (强制本地单文件加载)"""
+        return cls._get_pipeline(
+            device,
+            base_model,
+            repo,
+            ckpt,
+            StableDiffusionXLPipeline,
+            cls._text2img_cache,
+            "Text2Img",
+        )
 
     @classmethod
     def get_img2img(
         cls, device: str, base_model: str, repo: str, ckpt: str
     ) -> "StableDiffusionXLImg2ImgPipeline":
-        """获取 Img2Img Pipeline (带缓存)"""
-        if device not in cls._img2img_cache:
-            get_logger().info(f"📥 [{device}] 加载 SDXL Lightning Img2Img...")
-            unet = cls._load_unet(device, base_model, repo, ckpt)
-            pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-                base_model, unet=unet, torch_dtype=torch.float16, variant="fp16"
+        """获取 Img2Img Pipeline (强制本地单文件加载)"""
+        return cls._get_pipeline(
+            device,
+            base_model,
+            repo,
+            ckpt,
+            StableDiffusionXLImg2ImgPipeline,
+            cls._img2img_cache,
+            "Img2Img",
+        )
+
+    @classmethod
+    def _get_pipeline(
+        cls, device: str, base_model: str, repo: str, ckpt: str, pipe_cls, cache, name: str
+    ):
+        """通用 Pipeline 加载逻辑 (支持全离线 YAML 配置)"""
+        if device not in cache:
+            get_logger().info(f"📥 [{device}] 正在从本地文件加载 SDXL Lightning {name}...")
+
+            if not os.path.isfile(base_model):
+                raise FileNotFoundError(f"基础权重文件未找到: {base_model}")
+
+            # 寻找配套的离线配置文件 (.yaml)
+            config_path = base_model.rsplit(".", 1)[0] + ".yaml"
+            original_config = None
+            if os.path.exists(config_path):
+                get_logger().info(f"📜 发现配套离线配置: {config_path}")
+                original_config = config_path
+            else:
+                # 尝试在该目录下寻找任何一个 .yaml 文件作为备选
+                yaml_files = list(Path(base_model).parent.glob("*.yaml"))
+                if yaml_files:
+                    original_config = str(yaml_files[0])
+                    get_logger().info(f"📜 自动匹配目录下的配置: {original_config}")
+
+            # 寻找配套的 CLIP 字典配置目录 (用于离线 Tokenizer/TextEncoder)
+            # 优先寻找与模型同目录下的 'config' 文件夹
+            config_dir = os.path.join(os.path.dirname(base_model), "config")
+            local_config = None
+            if os.path.isdir(config_dir):
+                get_logger().info(f"📚 发现本地组件配置目录: {config_dir}")
+                local_config = config_dir
+
+            # 强制本地单文件加载 (如果提供了 original_config 和 local_config，则可全离线运行)
+            pipe = pipe_cls.from_single_file(
+                base_model,
+                original_config=original_config,
+                config=local_config,
+                torch_dtype=torch.float16,
+                local_files_only=True,
             ).to(device)
+
+            # 注入 Lightning 权重
+            cls._apply_lightning_to_pipe(pipe, device, repo, ckpt)
+
             pipe.scheduler = EulerDiscreteScheduler.from_config(
                 pipe.scheduler.config, timestep_spacing="trailing"
             )
             pipe.set_progress_bar_config(disable=True)
             cls._try_enable_optimizations(pipe)
-            cls._img2img_cache[device] = pipe
-        return cls._img2img_cache[device]
+            cache[device] = pipe
+        return cache[device]
 
-    @staticmethod
-    def _load_unet(device: str, base_model: str, repo: str, ckpt: str):
-        """加载 Lightning UNet (支持本地路径)"""
-        unet = UNet2DConditionModel.from_config(base_model, subfolder="unet").to(
-            device, torch.float16
-        )
-
+    @classmethod
+    def _apply_lightning_to_pipe(cls, pipe, device: str, repo: str, ckpt: str):
+        """将 Lightning 权重注入到现有 Pipeline 的 UNet 中"""
         local_path = Path(repo) / ckpt
-        if local_path.exists():
-            get_logger().info(f"🚀 加载本地 Lightning 权重: {local_path}")
-            state_dict = load_file(str(local_path), device=device)
-        else:
-            get_logger().info(f"🌐 从 Hugging Face 下载权重: {repo}/{ckpt}")
-            state_dict = load_file(hf_hub_download(repo, ckpt), device=device)
+        if not local_path.exists():
+            raise FileNotFoundError(f"Lightning 权重文件未找到: {local_path}")
 
-        unet.load_state_dict(state_dict)
-        return unet
+        get_logger().info(f"🚀 加载本地 Lightning 权重: {local_path}")
+        state_dict = load_file(str(local_path), device=device)
+        pipe.unet.load_state_dict(state_dict)
 
     @staticmethod
     def _try_enable_optimizations(pipe):
-        """尝试启用显存优化"""
+        """尝试启用显存优化和加速"""
+        # VAE slicing: 降低 VAE 编解码的峰值显存
+        try:
+            pipe.enable_vae_slicing()
+        except Exception:
+            pass
+
+        # VAE tiling: 支持任意大小输入
+        try:
+            pipe.enable_vae_tiling()
+        except Exception:
+            pass
+
+        # xformers: 高效注意力机制 (需要安装 xformers)
         try:
             pipe.enable_xformers_memory_efficient_attention()
+            get_logger().info("   ⚡ 已启用 xformers 加速")
+        except Exception:
+            pass
+
+        # torch.compile: PyTorch 2.0+ 编译加速
+        try:
+            import torch
+            if hasattr(torch, "compile") and torch.cuda.is_available():
+                pipe.unet = torch.compile(pipe.unet, mode="max-autotune", fullgraph=True)
+                get_logger().info("   ⚡ 已启用 torch.compile 加速")
         except Exception:
             pass
 
@@ -302,13 +377,20 @@ class DomainGenerator:
         lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
         styles: Optional[dict] = None,
         num_steps: int = 4,
+        img2img_size: int = 512,
+        guidance_scale: float = 4.5,
     ):
         self.device = device
         self.base_model = base_model
         self.lightning_repo = lightning_repo
         self.lightning_ckpt = lightning_ckpt
-        self.styles = styles or {}
+        if styles is None:
+            from ...config import Config
+            styles = Config().generation.styles
+        self.styles = styles
         self.num_steps = num_steps
+        self.img2img_size = img2img_size
+        self.guidance_scale = guidance_scale
         self._pipe = None
 
     def _get_pipe(self):
@@ -330,28 +412,33 @@ class DomainGenerator:
         prompt = self.styles[style]
         results = []
 
-        pbar = tqdm(
-            range(0, len(images), batch_size),
-            desc=f"      [{self.device}] {style}/{strength}",
-            position=_get_gpu_id(self.device),
-            leave=False,
-            mininterval=1.0,
-        )
+        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
-        for i in pbar:
-            batch = images[i : i + batch_size]
-            orig_h, orig_w = batch.shape[1], batch.shape[2]
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task_id = progress.add_task(f"      [{self.device}] {style}/{strength}", total=len(images))
+            
+            for i in range(0, len(images), batch_size):
+                batch = images[i : i + batch_size]
+                orig_h, orig_w = batch.shape[1], batch.shape[2]
 
-            pils = _prepare_pil_batch(batch, target_size=1024)
-            outputs = pipe(
-                prompt=[prompt] * len(pils),
-                image=pils,
-                strength=strength,
-                guidance_scale=0.0,
-                num_inference_steps=self.num_steps,
-            ).images
+                pils = _prepare_pil_batch(batch, self.img2img_size)
+                outputs = pipe(
+                    prompt=[prompt] * len(pils),
+                    image=pils,
+                    strength=strength,
+                    guidance_scale=self.guidance_scale,
+                    num_inference_steps=self.num_steps,
+                ).images
 
-            results.extend(_convert_to_numpy_batch(outputs, (orig_w, orig_h)))
+                results.extend(_convert_to_numpy_batch(outputs, (orig_w, orig_h)))
+                progress.update(task_id, advance=len(batch))
 
         return np.stack(results)
 
@@ -372,13 +459,22 @@ class OODGenerator:
         lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
         prompts: Optional[list] = None,
         num_steps: int = 4,
+        sdxl_height: int = 1024,
+        sdxl_width: int = 1024,
+        guidance_scale: float = 0.0,
     ):
         self.device = device
         self.base_model = base_model
         self.lightning_repo = lightning_repo
         self.lightning_ckpt = lightning_ckpt
-        self.prompts = prompts or []
+        if prompts is None:
+            from ...config import Config
+            prompts = Config().generation.ood_prompts
+        self.prompts = prompts
         self.num_steps = num_steps
+        self.sdxl_height = sdxl_height
+        self.sdxl_width = sdxl_width
+        self.guidance_scale = guidance_scale
         self._pipe = None
 
     def _get_pipe(self):
@@ -405,27 +501,32 @@ class OODGenerator:
         pipe = self._get_pipe()
         results = []
 
-        pbar = tqdm(
-            range(0, num_samples, batch_size),
-            desc=f"      [{self.device}] OOD 生成",
-            position=_get_gpu_id(self.device),
-            leave=False,
-            mininterval=1.0,
-        )
+        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
-        for i in pbar:
-            current_bs = min(batch_size, num_samples - i)
-            prompts = [random.choice(self.prompts) for _ in range(current_bs)]
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task_id = progress.add_task(f"      [{self.device}] OOD 生成", total=num_samples)
 
-            outputs = pipe(
-                prompt=prompts,
-                height=1024,
-                width=1024,
-                guidance_scale=0.0,
-                num_inference_steps=self.num_steps,
-            ).images
+            for i in range(0, num_samples, batch_size):
+                current_bs = min(batch_size, num_samples - i)
+                prompts = [random.choice(self.prompts) for _ in range(current_bs)]
 
-            results.extend(_convert_to_numpy_batch(outputs, (target_size, target_size)))
+                outputs = pipe(
+                    prompt=prompts,
+                    height=self.sdxl_height,
+                    width=self.sdxl_width,
+                    guidance_scale=self.guidance_scale,
+                    num_inference_steps=self.num_steps,
+                ).images
+
+                results.extend(_convert_to_numpy_batch(outputs, (target_size, target_size)))
+                progress.update(task_id, advance=current_bs)
 
         return np.stack(results)
 
@@ -553,14 +654,20 @@ def generate_corruption_dataset(
     tasks = [(c, images_np, SEVERITIES, output_dir, seed) for c in CORRUPTIONS]
     num_cpus = os.cpu_count()
 
-    with multiprocessing.Pool(processes=min(len(CORRUPTIONS), num_cpus)) as pool:
-        list(
-            tqdm(
-                pool.imap_unordered(_process_single_corruption, tasks),
-                total=len(tasks),
-                desc="   Corruption 总进度",
-            )
-        )
+    from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("   Corruption 总进度", total=len(tasks))
+
+        with multiprocessing.Pool(processes=min(len(CORRUPTIONS), num_cpus)) as pool:
+            for _ in pool.imap_unordered(_process_single_corruption, tasks):
+                progress.update(task_id, advance=1)
 
     np.save(str(output_dir / "labels.npy"), labels_np)
 
@@ -586,6 +693,7 @@ def generate_domain_dataset(
 ) -> Path:
     """预生成 domain shift 数据集"""
     import multiprocessing
+    import time
 
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"未知数据集: {dataset_name}")
@@ -607,6 +715,7 @@ def generate_domain_dataset(
     )
 
     styles_list = list(styles.keys()) if styles else []
+    start_time = time.time()
 
     if num_gpus == 0:
         # CPU 串行模式
@@ -660,7 +769,8 @@ def generate_domain_dataset(
         for p in processes:
             p.join()
 
-    get_logger().info(f"✅ {DatasetClass.NAME}-Domain 生成完成!")
+    elapsed = time.time() - start_time
+    get_logger().info(f"✅ {DatasetClass.NAME}-Domain 生成完成! ⏱️ 耗时: {elapsed:.1f}s ({elapsed/60:.1f}分钟)")
     return output_dir
 
 
@@ -748,22 +858,29 @@ def generate_ood_dataset(
     return output_dir
 
 
-def visualize_corruption(dataset_name: str, root: str = "./data", num_vis: int = 8):
+def visualize_corruption(
+    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None, seed: int = 42
+):
     """为 Corruption 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
     output_dir = Path(root) / f"{DatasetClass.NAME}-C"
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
-    test_dataset = DatasetClass(root=root, train=False)
+    extra_kwargs = {}
+    if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
+        extra_kwargs["seed"] = seed
+    test_dataset = DatasetClass(root=root, train=False, **extra_kwargs)
     images_np = test_dataset.images.permute(0, 2, 3, 1).numpy()
 
     get_logger().info("🎨 正在生成 Corruption 可视化对比图...")
 
-    for c in ["gaussian_noise", "fog", "glass_blur"]:
-        for s in [3, 5]:
+    vis_corruptions = gen_cfg.vis_corruptions if gen_cfg else ["gaussian_noise", "fog", "glass_blur"]
+
+    for c in vis_corruptions:
+        for s in SEVERITIES:
             corrupted = CorruptionGenerator.apply_batch(
-                images_np[:num_vis], c, s, seed=42
+                images_np[:num_vis], c, s, seed=seed
             )
             save_visual_comparison(
                 images_np[:num_vis],
@@ -775,7 +892,7 @@ def visualize_corruption(dataset_name: str, root: str = "./data", num_vis: int =
 
 
 def visualize_domain(
-    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None
+    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None, seed: int = 42
 ):
     """为 Domain Shift 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
@@ -783,7 +900,10 @@ def visualize_domain(
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
-    test_dataset = DatasetClass(root=root, train=False)
+    extra_kwargs = {}
+    if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
+        extra_kwargs["seed"] = seed
+    test_dataset = DatasetClass(root=root, train=False, **extra_kwargs)
     images_np = test_dataset.images.permute(0, 2, 3, 1).numpy()[:num_vis]
 
     get_logger().info("🎨 正在生成 Domain 可视化对比图...")
@@ -798,7 +918,7 @@ def visualize_domain(
     )
 
     for style in list(gen_cfg.styles.keys()):
-        for strength in [0.3, 0.7]:
+        for strength in gen_cfg.strengths:
             styled = generator.apply_batch(
                 images_np, style, strength, batch_size=num_vis
             )
@@ -885,10 +1005,12 @@ def _execute_generation(args, config):
 
 def _execute_visualization(args, config):
     if args.type == "corruption":
-        visualize_corruption(args.dataset, config.data_root, config.generation.num_vis)
+        visualize_corruption(
+            args.dataset, config.data_root, config.generation.num_vis, config.generation, config.seed
+        )
     elif args.type == "domain":
         visualize_domain(
-            args.dataset, config.data_root, config.generation.num_vis, config.generation
+            args.dataset, config.data_root, config.generation.num_vis, config.generation, config.seed
         )
     elif args.type == "ood":
         visualize_ood(args.dataset, config.data_root, config.generation.num_vis)

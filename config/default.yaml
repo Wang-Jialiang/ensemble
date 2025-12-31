@@ -41,6 +41,14 @@ constants:
   # 可视化
   plot_dpi: 300                     # 图表保存 DPI
 
+  # Loss Landscape 可视化参数
+  landscape_steps_1d: 50            # 1D 插值步数
+  landscape_steps_2d: 40            # 2D 平面采样步数
+  landscape_distance: 1.0           # 2D 平面采样距离
+
+  # Grad-CAM 分析参数
+  gradcam_num_samples: 50           # Grad-CAM 分析样本数
+
 # ==============================================================================
 # 可调参数
 # ==============================================================================
@@ -100,6 +108,8 @@ base:
   save_every_n_epochs: 20           # 每 N 轮保存一次检查点
   keep_last_n_checkpoints: 3        # 保留最近 N 个检查点
   use_tensorboard: true             # 是否启用 TensorBoard 日志
+  use_wandb: true                  # 是否启用 Weights & Biases 日志
+  wandb_project: "ensemble"         # wandb 项目名称
   log_level: "INFO"                 # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
 
   # ==========================================================================
@@ -185,14 +195,24 @@ eval_checkpoints:
 # 数据生成配置 (generate.py 使用)
 # ==============================================================================
 generation:
-  base_model: "./models/sdxl-base-1.0"  # SDXL 基础模型
+  base_model: "./models/sdxl-base-1.0/sd_xl_base_1.0.safetensors"  # SDXL 基础模型
   lightning_repo: "./models/SDXL-Lightning"              # Lightning UNet 仓库
   lightning_ckpt: "sdxl_lightning_4step_unet.safetensors"  # 4-step UNet 检查点
   num_steps: 4                                             # 推理步数 (2/4/8)
-  batch_size: 24                                           # A6000 48GB 推荐
-  samples_per_group: 1000                                  # 每组样本数 (Domain/OOD)
+  batch_size: 12                                           # 启用VAE优化后可提高
+  samples_per_group: 500                                   # 每组样本数 (500足够评估)
   visualize: true                                          # 是否生成可视化对比图
-  num_vis: 10                                              # 每个类别/风格可视化的样本数
+  num_vis: 5                                              # 每个类别/风格可视化的样本数
+
+  # SDXL 生成参数
+  sdxl_height: 1024                                        # Text2Img 原始输出高度
+  sdxl_width: 1024                                         # Text2Img 原始输出宽度
+  img2img_size: 512                                        # Img2Img 中间处理尺寸
+  guidance_scale_img2img: 4.5                              # Img2Img CFG 引导强度
+  guidance_scale_text2img: 0.0                             # Text2Img CFG (Lightning 推荐 0)
+
+  # 可视化选项
+  vis_corruptions: ["gaussian_noise", "fog", "glass_blur"]  # 可视化的 corruption 类型
 
   # Domain Shift 风格与提示词
   styles:

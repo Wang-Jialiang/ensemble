@@ -3,91 +3,15 @@
 模型工厂模块
 ================================================================================
 
-包含: 初始化策略、模型注册表、ModelFactory
+包含: 模型注册表、ModelFactory
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import List, Optional
 
 import torch.nn as nn
 
+from .init import INIT_REGISTRY, apply_init, get_supported_inits
 from .resnet import BasicBlock, Bottleneck, ResNet
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ 初始化策略                                                                    ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-INIT_REGISTRY: Dict[str, Callable[[nn.Module], None]] = {}
-
-
-def register_init(name: str):
-    """初始化策略注册装饰器"""
-
-    def decorator(fn):
-        INIT_REGISTRY[name] = fn
-        return fn
-
-    return decorator
-
-
-@register_init("kaiming")
-def init_kaiming(model):
-    """Kaiming (He) 初始化段"""
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            if m.bias is not None: nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
-            if m.bias is not None: nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-
-
-@register_init("xavier")
-def init_xavier(model):
-    """Xavier (Glorot) 初始化段"""
-    for m in model.modules():
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
-            nn.init.xavier_normal_(m.weight)
-            if m.bias is not None: nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-
-
-@register_init("orthogonal")
-def init_orthogonal(model: nn.Module) -> None:
-    """正交初始化 - 保持梯度范数稳定"""
-    for m in model.modules():
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
-            nn.init.orthogonal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-
-
-@register_init("default")
-def init_default(model: nn.Module) -> None:
-    """PyTorch 默认初始化 (不做任何修改)"""
-    pass
-
-
-def apply_init(model: nn.Module, method: str = "kaiming") -> nn.Module:
-    """解析并应用初始化策略 (大纲化)"""
-    method = method.lower()
-    if method not in INIT_REGISTRY:
-        raise ValueError(f"不支持的初始化: {method}. 已注册: {list(INIT_REGISTRY.keys())}")
-    
-    INIT_REGISTRY[method](model)
-    return model
-
-
-def get_supported_inits() -> List[str]:
-    """获取支持的初始化方法列表"""
-    return list(INIT_REGISTRY.keys())
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -136,16 +60,14 @@ def resnet50(num_classes: int):
 
 @register_model("vgg16")
 def vgg16(num_classes: int):
-    from torchvision.models import vgg16 as tv_vgg16
-
-    return tv_vgg16(num_classes=num_classes)
+    from .wrappers import VGG16Wrapper
+    return VGG16Wrapper(num_classes=num_classes)
 
 
 @register_model("efficientnet_b0")
 def efficientnet_b0(num_classes: int):
-    from torchvision.models import efficientnet_b0 as tv_effnet
-
-    return tv_effnet(num_classes=num_classes)
+    from .wrappers import EfficientNetB0Wrapper
+    return EfficientNetB0Wrapper(num_classes=num_classes)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
