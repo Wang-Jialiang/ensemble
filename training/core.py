@@ -23,6 +23,7 @@ from ..config import Config
 from ..utils import console, ensure_dir, format_duration, get_logger
 from .optimization import EarlyStopping
 from .worker import GPUWorker, HistorySaver
+from ..evaluation.strategies import get_ensemble_fn
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Checkpoint Mixin                                                           ║
@@ -69,6 +70,7 @@ class CheckpointMixin:
         state = {
             "epoch": len(self.history["epoch"]),
             "best_val_loss": self._best_val_loss,
+            "best_val_acc": self._best_val_acc,
             "best_epoch": self._best_epoch,
             "history": self.history,
             "early_stopping_counter": self.early_stopping.counter,
@@ -84,7 +86,8 @@ class CheckpointMixin:
         if not file.exists(): return
         
         s = torch.load(file, weights_only=False)
-        self._best_val_loss, self._best_epoch = s["best_val_loss"], s["best_epoch"]
+        self._best_val_loss, self._best_val_acc = s["best_val_loss"], s.get("best_val_acc", 0.0)
+        self._best_epoch = s["best_epoch"]
         self.history = s["history"]
         self.early_stopping.counter = s.get("early_stopping_counter", 0)
         self.total_training_time = s.get("total_time", 0.0)
@@ -200,7 +203,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             metrics={"val_loss": "min", "val_acc": "max"},
             criteria="any"
         )
-        self._best_val_loss, self._best_epoch = float("inf"), 0
+        self._best_val_loss, self._best_val_acc, self._best_epoch = float("inf"), 0.0, 0
         self.history_saver = HistorySaver(self.cfg.save_dir)
 
     def get_models(self) -> List[nn.Module]:
@@ -278,6 +281,10 @@ class StagedEnsembleTrainer(CheckpointMixin):
         total_loss, n = 0.0, 0
         from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 
+        # 判断是否为 Warmup 单模型训练模式
+        stage_num = self._get_stage_info(epoch)[0]
+        is_warmup_single_model = self.share_warmup_backbone and stage_num == 1
+
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -286,24 +293,27 @@ class StagedEnsembleTrainer(CheckpointMixin):
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            task_id = progress.add_task(
-                f"Epoch {epoch+1:3d} [LR={self.workers[0].get_lr():.6f}]",
-                total=len(loader),
-                loss="0.0000",
-            )
+            desc = f"Epoch {epoch+1:3d} [LR={self.workers[0].get_lr():.6f}]"
+            if is_warmup_single_model:
+                desc += " [Warmup-SingleModel]"
+            task_id = progress.add_task(desc, total=len(loader), loss="0.0000")
 
             for inputs, targets in loader:
-                # 异步分发任务
-                for w in self.workers:
-                    w.train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask)
-
-                # 同步并聚合损失
-                batch_loss = sum(w.synchronize() for w in self.workers) / len(self.workers)
+                if is_warmup_single_model:
+                    # Warmup 优化：仅训练第一个 Worker 的第一个模型
+                    self.workers[0].train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask, model_indices=[0])
+                    batch_loss = self.workers[0].synchronize()
+                else:
+                    # 正常模式：所有 Worker 所有模型
+                    for w in self.workers:
+                        w.train_batch_async(inputs, targets, criterion, m_ratio, m_prob, use_mask)
+                    batch_loss = sum(w.synchronize() for w in self.workers) / len(self.workers)
+                
                 total_loss += batch_loss
                 n += 1
                 progress.update(task_id, advance=1, loss=f"{total_loss/n:.4f}")
 
-        # 步进调度器
+        # 步进调度器 (所有模型，保持 LR 同步)
         for w in self.workers:
             w.step_schedulers()
         return total_loss / n
@@ -328,9 +338,11 @@ class StagedEnsembleTrainer(CheckpointMixin):
         return total_loss / len(val_loader), 100. * correct / total
 
     def _collect_ensemble_logits(self, inputs, device):
-        """从分布式 Workers 中收集并平均预测结果"""
+        """从分布式 Workers 中收集并聚合预测结果"""
         logits_list = [w.predict_batch(inputs).to(device) for w in self.workers]
-        return torch.stack(logits_list).mean(0)
+        stacked = torch.stack(logits_list)
+        ensemble_fn = get_ensemble_fn(self.cfg)
+        return ensemble_fn(stacked)
 
     def train(self, train_loader: DataLoader, val_loader: DataLoader):
         """执行全生命周期训练 (大纲化)"""
@@ -393,7 +405,12 @@ class StagedEnsembleTrainer(CheckpointMixin):
         if stats["val_loss"] < self._best_val_loss:
             self._best_val_loss, self._best_epoch = stats["val_loss"], epoch
             self._save_checkpoint("best")
-            self.logger.info(f"   🏆 New Best: {stats['val_loss']:.4f}")
+            self.logger.info(f"   🏆 New Best Loss: {stats['val_loss']:.4f}")
+
+        if stats["val_acc"] > self._best_val_acc:
+            self._best_val_acc = stats["val_acc"]
+            self._save_checkpoint("best_acc")
+            self.logger.info(f"   ⭐ New Best Acc: {stats['val_acc']:.2f}%")
 
         # 3. 定期检查点
         if (epoch + 1) % self.cfg.save_every_n_epochs == 0:

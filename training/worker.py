@@ -82,19 +82,27 @@ class GPUWorker:
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)
 
-    def train_batch_async(self, inputs, targets, criterion, m_ratio, m_prob, use_mask):
-        """执行异步批次训练 (大纲化)"""
+    def train_batch_async(self, inputs, targets, criterion, m_ratio, m_prob, use_mask, model_indices=None):
+        """执行异步批次训练 (大纲化)
+        
+        Args:
+            model_indices: 可选，指定要训练的模型索引列表。None 表示训练全部模型。
+        """
         with torch.cuda.stream(self.stream):
             # 1. 搬运数据至显存
             inputs = inputs.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
-            # 2. 依次迭代管理的所有模型
+            # 2. 确定要训练的模型
+            indices = list(model_indices) if model_indices is not None else list(range(self.num_models))
+            
+            # 3. 迭代指定的模型
             total_loss = 0.0
-            for i, (m, opt) in enumerate(zip(self.models, self.optimizers)):
+            for i in indices:
+                m, opt = self.models[i], self.optimizers[i]
                 total_loss += self._step_model(i, m, opt, inputs, targets, criterion, m_ratio, m_prob, use_mask)
 
-            self._pending_loss = total_loss / self.num_models
+            self._pending_loss = total_loss / len(indices) if len(indices) > 0 else 0.0
 
     def _step_model(self, idx, model, optimizer, inputs, targets, criterion, m_ratio, m_prob, use_mask):
         """执行单个模型的梯度更新步"""
