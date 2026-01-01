@@ -283,15 +283,9 @@ class GradCAMAnalyzer:
             ),
             "avg_cam_similarity": np.mean(similarities) if similarities else 0,
             "avg_cam_overlap": np.mean(overlaps) if overlaps else 0,
-            "std_cam_entropy": np.std(
-                [m["avg_cam_entropy"] for m in per_model_metrics]
-            ),
         }
 
-        return {
-            "per_model": per_model_metrics,
-            "overall": overall_metrics,
-        }
+        return overall_metrics
 
 
 class ModelListWrapper:

@@ -49,8 +49,13 @@ from .gradcam import (
     ModelListWrapper,
 )
 
-# 模型推理
-from .inference import get_all_models_logits, get_models_from_source
+# 模型推理与特征提取
+from .inference import (
+    FeatureExtractor,
+    get_all_models_features,
+    get_all_models_logits,
+    get_models_from_source,
+)
 
 # Loss Landscape
 from .landscape import LossLandscapeVisualizer
@@ -81,9 +86,11 @@ __all__ = [
     # CKA
     "linear_cka",
     "compute_ensemble_cka",
-    # Inference
+    # Inference & Feature Extraction
     "get_models_from_source",
     "get_all_models_logits",
+    "get_all_models_features",
+    "FeatureExtractor",
     # Metrics
     "MetricsCalculator",
     # Checkpoint

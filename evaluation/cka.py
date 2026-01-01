@@ -51,11 +51,12 @@ def linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     return cka.item()
 
 
-def compute_ensemble_cka(all_logits: torch.Tensor) -> Dict[str, float]:
+def compute_ensemble_cka(all_features: torch.Tensor) -> Dict[str, float]:
     """计算集成模型中所有模型对的 CKA 相似度
 
     Args:
-        all_logits: [num_models, num_samples, num_classes]
+        all_features: [num_models, num_samples, feature_dim]
+                      特征来自模型倒数第二层 (如 avgpool 输出)
 
     Returns:
         包含 CKA 统计信息的字典:
@@ -64,7 +65,7 @@ def compute_ensemble_cka(all_logits: torch.Tensor) -> Dict[str, float]:
         - max_cka: 最大 CKA 相似度
         - cka_diversity: CKA 多样性 = 1 - avg_cka (越高表示越多样)
     """
-    num_models = all_logits.shape[0]
+    num_models = all_features.shape[0]
     if num_models < 2:
         return {
             "avg_cka": 1.0,
@@ -76,9 +77,9 @@ def compute_ensemble_cka(all_logits: torch.Tensor) -> Dict[str, float]:
     cka_values = []
     for i in range(num_models):
         for j in range(i + 1, num_models):
-            # 使用 logits 作为表示
-            X = all_logits[i]  # [num_samples, num_classes]
-            Y = all_logits[j]
+            # 使用隐藏层特征作为表示
+            X = all_features[i]  # [num_samples, feature_dim]
+            Y = all_features[j]
             cka = linear_cka(X, Y)
             cka_values.append(cka)
 

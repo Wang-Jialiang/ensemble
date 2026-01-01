@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from ..datasets.robustness.ood import OODDataset
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ..config import Config
@@ -64,46 +63,67 @@ class ReportGenerator:
         return ""
 
     @staticmethod
-    def _evaluate_models(models, exp_name, test_loader, cfg, device, training_time=0.0, **datasets) -> Dict[str, Any]:
+    def _evaluate_models(
+        models, exp_name, test_loader, cfg, device, training_time=0.0, **datasets
+    ) -> Dict[str, Any]:
         """通用模型评估方法 - 生命周期钩子模式"""
         get_logger().info(f"\n📊 Evaluating: {exp_name}")
         res = {"experiment_name": exp_name, "training_time_seconds": training_time}
 
         # 1. 标准标准指标 (Acc, ECE, NLL)
-        res["standard_metrics"] = ReportGenerator._run_standard_eval(models, test_loader, cfg, device)
-        
+        res["standard_metrics"] = ReportGenerator._run_standard_eval(
+            models, test_loader, cfg, device
+        )
+
         # 2. 鲁棒性套件 (Corruption, OOD, Domain)
-        res.update(ReportGenerator._run_robustness_eval(models, cfg, test_loader, **datasets))
-        
+        res.update(
+            ReportGenerator._run_robustness_eval(models, cfg, test_loader, **datasets)
+        )
+
         # 3. 对抗性与可解释性分析
-        res.update(ReportGenerator._run_analysis_eval(models, cfg, test_loader, **datasets))
-        
+        res.update(
+            ReportGenerator._run_analysis_eval(models, cfg, test_loader, **datasets)
+        )
+
         return res
 
     @staticmethod
     def _run_standard_eval(models, loader, cfg, device):
         get_logger().info("   🔍 Standard evaluation...")
         all_l, all_t = get_all_models_logits(models, loader, device)
-        m = MetricsCalculator(cfg.num_classes, cfg.ece_n_bins).calculate_all_metrics(all_l, all_t, get_ensemble_fn(cfg))
-        get_logger().info(f"   Ensemble Acc: {m['ensemble_acc']:.2f}% | ECE: {m['ece']:.4f}")
+        m = MetricsCalculator(cfg.num_classes, cfg.ece_n_bins).calculate_all_metrics(
+            all_l, all_t, get_ensemble_fn(cfg)
+        )
+        get_logger().info(
+            f"   Ensemble Acc: {m['ensemble_acc']:.2f}% | ECE: {m['ece']:.4f}"
+        )
         return m
 
     @staticmethod
     def _run_robustness_eval(models, cfg, loader, **ds):
         r = {"corruption_results": None, "ood_results": None, "domain_results": None}
-        
+
         if ds.get("corruption_dataset"):
             get_logger().info("   🔍 Corruption evaluation...")
-            r["corruption_results"] = evaluate_corruption(models, ds["corruption_dataset"], cfg)
-            
+            r["corruption_results"] = evaluate_corruption(
+                models, ds["corruption_dataset"], cfg
+            )
+
         if ds.get("ood_dataset"):
             get_logger().info("   🔍 OOD detection evaluation...")
-            r["ood_results"] = evaluate_ood(models, loader, ds["ood_dataset"].get_loader(cfg), ds["ood_dataset"].name)
-            
+            r["ood_results"] = evaluate_ood(
+                models,
+                loader,
+                ds["ood_dataset"].get_loader(cfg),
+                ds["ood_dataset"].name,
+            )
+
         if ds.get("domain_dataset"):
             get_logger().info("   🔍 Domain shift evaluation...")
-            r["domain_results"] = ReportGenerator._evaluate_domain_suite(models, ds["domain_dataset"], cfg)
-            
+            r["domain_results"] = ReportGenerator._evaluate_domain_suite(
+                models, ds["domain_dataset"], cfg
+            )
+
         return r
 
     @staticmethod
@@ -111,11 +131,18 @@ class ReportGenerator:
         a = {"adversarial_results": None, "gradcam_metrics": None}
         if ds.get("run_adversarial", True):
             get_logger().info("   🔍 Adversarial evaluation...")
-            a["adversarial_results"] = evaluate_adversarial(models, loader, cfg.adv_eps, cfg.adv_alpha, cfg.adv_pgd_steps, cfg.dataset_name)
-        
+            a["adversarial_results"] = evaluate_adversarial(
+                models, loader, cfg=cfg, logger=get_logger()
+            )
+
         if ds.get("run_gradcam", False):
             get_logger().info("   🔍 Grad-CAM analysis...")
-            a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality([ModelListWrapper(models)], loader, cfg.gradcam_num_samples, cfg.image_size)
+            a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality(
+                [ModelListWrapper(models)],
+                loader,
+                cfg.gradcam_num_samples,
+                cfg.image_size,
+            )
         return a
 
     @staticmethod
@@ -127,11 +154,15 @@ class ReportGenerator:
             for st in dataset.STRENGTHS:
                 try:
                     loader = dataset.get_loader(s, st, cfg)
-                    m = evaluate_domain_shift(models, loader, f"{s}_{st}", cfg.num_classes)
+                    m = evaluate_domain_shift(
+                        models, loader, f"{s}_{st}", cfg.num_classes
+                    )
                     res["by_style_strength"][f"{s}_{st}"] = m
                     accs.append(m["domain_acc"])
-                except FileNotFoundError: continue
-        if accs: res["overall_avg"] = sum(accs) / len(accs)
+                except FileNotFoundError:
+                    continue
+        if accs:
+            res["overall_avg"] = sum(accs) / len(accs)
         return res
 
     @staticmethod
@@ -162,46 +193,60 @@ class ReportGenerator:
         """生成文本报告 (大纲化渲染)"""
         lines = []
         exps = list(results.keys())
-        
+
         # 1. 绘制 Header
-        lines.append("="*115)
-        lines.append(f"📊 EXPERIMENT COMPARISON" if len(exps)>1 else f"📊 RESULTS: {exps[0]}")
-        lines.append("="*115)
+        lines.append("=" * 115)
+        lines.append(
+            "📊 EXPERIMENT COMPARISON" if len(exps) > 1 else f"📊 RESULTS: {exps[0]}"
+        )
+        lines.append("=" * 115)
 
         # 2. 核心性能对比表
         lines.extend(cls._format_perf_table(results, exps))
-        
+
         # 3. 详细子系统报告
-        for name in exps: 
+        for name in exps:
             lines.extend(cls._format_detailed_exp(results[name]))
-            
+
         # 4. 鲁棒性专门板块
         lines.extend(cls._format_robustness_sections(results, exps))
-        
+
         return "\n".join(lines)
 
     @classmethod
     def _format_perf_table(cls, results, names):
-        t = ["\n🎯 Performance Metrics", "-"*115, 
-             f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10} | {'Time':<12}",
-             "-"*115]
-        accs = [results[n].get("standard_metrics", {}).get("ensemble_acc", 0) for n in names]
+        t = [
+            "\n🎯 Performance Metrics",
+            "-" * 115,
+            f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10} | {'Time':<12}",
+            "-" * 115,
+        ]
+        accs = [
+            results[n].get("standard_metrics", {}).get("ensemble_acc", 0) for n in names
+        ]
         for n in names:
             m = results[n].get("standard_metrics", {})
             tm = format_duration(results[n].get("training_time_seconds", 0))
             mark = cls._get_rank_marker(m.get("ensemble_acc", 0), accs, True)
-            t.append(f"{n:<25} | {m.get('ensemble_acc', 0):<7.2f}{mark:<3} | {m.get('avg_individual_acc', 0):<10.2f} | "
-                     f"{m.get('oracle_acc', 0):<10.2f} | {m.get('ece', 0):<10.4f} | {m.get('nll', 0):<10.4f} | {tm:<12}")
+            t.append(
+                f"{n:<25} | {m.get('ensemble_acc', 0):<7.2f}{mark:<3} | {m.get('avg_individual_acc', 0):<10.2f} | "
+                f"{m.get('oracle_acc', 0):<10.2f} | {m.get('ece', 0):<10.4f} | {m.get('nll', 0):<10.4f} | {tm:<12}"
+            )
         t.append("-" * 115)
         return t
 
     @classmethod
     def _format_detailed_exp(cls, r):
         m = r.get("standard_metrics", {})
-        return ["\n📋 Detailed Metrics", "="*115, f"\n🔹 {r['experiment_name']}", "-"*40,
-                f"   🔀 Div: Dis={m.get('disagreement', 0):.2f}% | JS={m.get('js_divergence', 0):.4f} | Spearman={m.get('spearman_correlation', 1.0):.4f}",
-                f"   ⚖️ Fair: BalAcc={m.get('balanced_acc', 0):.2f}% | Gini={m.get('acc_gini_coef', 0):.4f} | Score={m.get('fairness_score', 0):.2f}",
-                "-" * 40]
+        return [
+            "\n📋 Detailed Metrics",
+            "=" * 115,
+            f"\n🔹 {r['experiment_name']}",
+            "-" * 40,
+            f"   🔀 Div: Dis={m.get('disagreement', 0):.2f}% | CKA_Avg={m.get('avg_cka', 0):.4f} | CKA_Div={m.get('cka_diversity', 0):.4f}",
+            f"   ⚖️ Fair: BalAcc={m.get('balanced_acc', 0):.2f}% | Gini={m.get('acc_gini_coef', 0):.4f} | Score={m.get('fairness_score', 0):.2f}",
+            "-" * 40,
+        ]
 
     @classmethod
     def _format_robustness_sections(cls, results, names):
@@ -209,9 +254,26 @@ class ReportGenerator:
         for n in names:
             r = results[n]
             corr = r.get("corruption_results", {}).get("overall_avg", 0)
-            pgd = r.get("adversarial_results", {}).get("pgd_acc", 0)
             ood = r.get("ood_results", {}).get("auc_roc", 0)
-            s.append(f"   {n:<25} | Corr: {corr:2.2f}% | PGD: {pgd:2.2f}% | OOD AUC: {ood:.4f}")
+
+            # 处理对抗评估结果 (支持单 epsilon 或多 epsilon 字典)
+            adv = r.get("adversarial_results", {})
+            if not adv:
+                pgd_str = "N/A"
+            elif "pgd_acc" in adv:
+                # 单 ε 模式
+                pgd_str = f"{adv['pgd_acc']:2.2f}%"
+            else:
+                # 多 ε 模式: 显示平均值并标注 [avg]
+                pgd_accs = [v.get("pgd_acc", 0) for v in adv.values()]
+                avg_pgd = sum(pgd_accs) / len(pgd_accs) if pgd_accs else 0
+                # TODO: 下一个版本可以添加 FGSM 的展示对比
+                details = "/".join([f"{v.get('pgd_acc', 0):.1f}" for v in adv.values()])
+                pgd_str = f"{avg_pgd:2.2f}% [{details}]"
+
+            s.append(
+                f"   {n:<25} | Corr: {corr:2.2f}% | PGD: {pgd_str} | OOD AUC: {ood:.4f}"
+            )
         return s
 
     @classmethod
@@ -340,30 +402,10 @@ class ReportGenerator:
             landscape_viz = LossLandscapeVisualizer(output_dir, dpi=cfg.plot_dpi)
 
             for exp_name, models in all_models.items():
-                # 模型参数距离热力图 (无需 loss-landscapes 依赖)
+                # 模型参数距离热力图 (NDS 核心分析)
                 landscape_viz.plot_model_distance_heatmap(
                     models, filename=f"{exp_name}_model_distances.png"
                 )
-
-                # Loss Landscape 插值 (需要 loss-landscapes)
-                landscape_viz.plot_ensemble_interpolations(
-                    models,
-                    test_loader,
-                    device,
-                    filename=f"{exp_name}_loss_landscape.png",
-                )
-
-                # 2D/3D 表面图 - 为第一个模型生成 (计算量较大)
-                if len(models) > 0:
-                    landscape_viz.plot_2d_plane(
-                        models[0],
-                        test_loader,
-                        device,
-                        distance=cfg.landscape_distance,
-                        steps=cfg.landscape_steps_2d,
-                        filename=f"{exp_name}_landscape_surface.png",
-                        model_name=f"{exp_name}_M1",
-                    )
 
         # 生成并保存文本报告
         cls._save_and_print(results, output_dir)

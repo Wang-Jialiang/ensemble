@@ -103,12 +103,11 @@ class ReportVisualizer:
             r.get("standard_metrics", {}).get("disagreement", 0)
             for r in results.values()
         ]
-        js_divergence = [
-            r.get("standard_metrics", {}).get("js_divergence", 0)
-            for r in results.values()
+        avg_cka = [
+            r.get("standard_metrics", {}).get("avg_cka", 0) for r in results.values()
         ]
-        diversity = [
-            r.get("standard_metrics", {}).get("diversity", 0) * 1000
+        cka_diversity = [
+            r.get("standard_metrics", {}).get("cka_diversity", 0)
             for r in results.values()
         ]
 
@@ -119,14 +118,14 @@ class ReportVisualizer:
         ax1.set_title("Hard Disagreement (↑ more diverse)")
         ax1.tick_params(axis="x", rotation=45)
 
-        ax2.bar(names, js_divergence, color="#e74c3c")
-        ax2.set_ylabel("JS Divergence")
-        ax2.set_title("Soft Disagreement (↑ more diverse)")
+        ax2.bar(names, avg_cka, color="#e74c3c")
+        ax2.set_ylabel("Avg CKA")
+        ax2.set_title("CKA Similarity (↓ more diverse)")
         ax2.tick_params(axis="x", rotation=45)
 
-        ax3.bar(names, diversity, color="#1abc9c")
-        ax3.set_ylabel("Diversity (×1000)")
-        ax3.set_title("Prediction Diversity (↑ more diverse)")
+        ax3.bar(names, cka_diversity, color="#1abc9c")
+        ax3.set_ylabel("CKA Diversity")
+        ax3.set_title("CKA Diversity (↑ more diverse)")
         ax3.tick_params(axis="x", rotation=45)
 
         plt.tight_layout()
@@ -194,8 +193,8 @@ class ReportVisualizer:
         import matplotlib.pyplot as plt
 
         names = list(results.keys())
-        metrics = ["balanced_acc", "fairness_score", "worst_class_acc"]
-        labels = ["Balanced Acc", "Fairness Score", "Worst Class Acc"]
+        metrics = ["balanced_acc", "fairness_score", "bottom_3_class_acc"]
+        labels = ["Balanced Acc", "Fairness Score", "Bottom-3 Acc"]
 
         fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -256,6 +255,51 @@ class ReportVisualizer:
         plt.close()
         get_logger().info(f"📊 Saved: {filename}")
 
+    def plot_adversarial_curve(
+        self, results: Dict[str, Dict], filename: str = "adversarial_curve.png"
+    ):
+        """对抗鲁棒性曲线图 (Accuracy vs. Epsilon)"""
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        has_plot = False
+        colors = plt.cm.get_cmap("tab10")
+
+        for i, (name, result) in enumerate(results.items()):
+            adv = result.get("adversarial_results", {})
+            if not adv or "pgd_acc" in adv:
+                continue  # 跳过非多 ε 结果
+
+            epsilons = sorted(list(adv.keys()))
+            # TODO: 未来可以同时绘制 FGSM 的曲线来进行对比
+            pgd_accs = [adv[e].get("pgd_acc", 0) for e in epsilons]
+
+            # 同时也画出 Clean Acc 作为参照点 (ε=0)
+            clean_acc = result.get("standard_metrics", {}).get("ensemble_acc", 0)
+
+            all_eps = [0.0] + epsilons
+            all_accs = [clean_acc] + pgd_accs
+
+            ax.plot(all_eps, all_accs, marker="o", label=name, color=colors(i))
+            has_plot = True
+
+        if not has_plot:
+            plt.close()
+            return
+
+        ax.set_xlabel("Epsilon (Perturbation Budget)")
+        ax.set_ylabel("PGD Accuracy (%)")
+        ax.set_title("Adversarial Robustness Curve (Accuracy vs. ε)")
+        ax.legend()
+        ax.set_ylim(0, 105)
+        ax.grid(True, linestyle="--", alpha=0.7)
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / filename, dpi=self.dpi)
+        plt.close()
+        get_logger().info(f"📊 Saved: {filename}")
+
     def generate_all(self, results: Dict[str, Dict]):
         """生成所有可视化图表"""
         self.plot_accuracy_comparison(results)
@@ -263,6 +307,7 @@ class ReportVisualizer:
         self.plot_diversity_comparison(results)
         self.plot_fairness_radar(results)
         self.plot_training_time(results)
+        self.plot_adversarial_curve(results)
 
         # 如果有corruption结果，生成热力图
         if any(r.get("corruption_results") for r in results.values()):

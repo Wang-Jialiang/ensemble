@@ -30,7 +30,6 @@ except RuntimeError:
 
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
 
 from ...utils import console
 
@@ -64,7 +63,6 @@ def patch_dependencies():
 patch_dependencies()
 
 import torch
-from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
@@ -268,11 +266,20 @@ class LightningPipelineLoader:
 
     @classmethod
     def _get_pipeline(
-        cls, device: str, base_model: str, repo: str, ckpt: str, pipe_cls, cache, name: str
+        cls,
+        device: str,
+        base_model: str,
+        repo: str,
+        ckpt: str,
+        pipe_cls,
+        cache,
+        name: str,
     ):
         """通用 Pipeline 加载逻辑 (支持全离线 YAML 配置)"""
         if device not in cache:
-            get_logger().info(f"📥 [{device}] 正在从本地文件加载 SDXL Lightning {name}...")
+            get_logger().info(
+                f"📥 [{device}] 正在从本地文件加载 SDXL Lightning {name}..."
+            )
 
             if not os.path.isfile(base_model):
                 raise FileNotFoundError(f"基础权重文件未找到: {base_model}")
@@ -354,8 +361,11 @@ class LightningPipelineLoader:
         # torch.compile: PyTorch 2.0+ 编译加速
         try:
             import torch
+
             if hasattr(torch, "compile") and torch.cuda.is_available():
-                pipe.unet = torch.compile(pipe.unet, mode="max-autotune", fullgraph=True)
+                pipe.unet = torch.compile(
+                    pipe.unet, mode="max-autotune", fullgraph=True
+                )
                 get_logger().info("   ⚡ 已启用 torch.compile 加速")
         except Exception:
             pass
@@ -386,6 +396,7 @@ class DomainGenerator:
         self.lightning_ckpt = lightning_ckpt
         if styles is None:
             from ...config import Config
+
             styles = Config().generation.styles
         self.styles = styles
         self.num_steps = num_steps
@@ -412,7 +423,13 @@ class DomainGenerator:
         prompt = self.styles[style]
         results = []
 
-        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeRemainingColumn,
+        )
 
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -422,8 +439,10 @@ class DomainGenerator:
             console=console,
             transient=True,
         ) as progress:
-            task_id = progress.add_task(f"      [{self.device}] {style}/{strength}", total=len(images))
-            
+            task_id = progress.add_task(
+                f"      [{self.device}] {style}/{strength}", total=len(images)
+            )
+
             for i in range(0, len(images), batch_size):
                 batch = images[i : i + batch_size]
                 orig_h, orig_w = batch.shape[1], batch.shape[2]
@@ -469,6 +488,7 @@ class OODGenerator:
         self.lightning_ckpt = lightning_ckpt
         if prompts is None:
             from ...config import Config
+
             prompts = Config().generation.ood_prompts
         self.prompts = prompts
         self.num_steps = num_steps
@@ -501,7 +521,13 @@ class OODGenerator:
         pipe = self._get_pipe()
         results = []
 
-        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeRemainingColumn,
+        )
 
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -511,7 +537,9 @@ class OODGenerator:
             console=console,
             transient=True,
         ) as progress:
-            task_id = progress.add_task(f"      [{self.device}] OOD 生成", total=num_samples)
+            task_id = progress.add_task(
+                f"      [{self.device}] OOD 生成", total=num_samples
+            )
 
             for i in range(0, num_samples, batch_size):
                 current_bs = min(batch_size, num_samples - i)
@@ -525,7 +553,9 @@ class OODGenerator:
                     num_inference_steps=self.num_steps,
                 ).images
 
-                results.extend(_convert_to_numpy_batch(outputs, (target_size, target_size)))
+                results.extend(
+                    _convert_to_numpy_batch(outputs, (target_size, target_size))
+                )
                 progress.update(task_id, advance=current_bs)
 
         return np.stack(results)
@@ -575,23 +605,20 @@ def _worker_domain(
         styles=full_styles_dict,
         num_steps=num_steps,
     )
-    DatasetClass = DATASET_REGISTRY[dataset_name]
 
     for style in styles:
         for strength in strengths:
             get_logger().info(f"   [{device}] 生成: {style} (strength={strength})...")
-            strength_dir = output_dir / style / str(strength)
 
-            for class_idx in range(DatasetClass.NUM_CLASSES):
-                ensure_dir(strength_dir / f"class_{class_idx:04d}")
-
+            # 直接生成并保存为 .npy，不再创建子目录
             styled_images = generator.apply_batch(
                 images_np, style, strength, batch_size=batch_size
             )
 
-            for i, (img, label) in enumerate(zip(styled_images, labels_np)):
-                img_path = strength_dir / f"class_{label:04d}" / f"img_{i}.png"
-                Image.fromarray(img).save(str(img_path))
+            # 文件名格式: {style}_{strength}.npy
+            ensure_dir(output_dir / style)
+            save_path = output_dir / style / f"{strength}.npy"
+            np.save(str(save_path), styled_images.astype(np.uint8))
 
 
 def _worker_ood_gpu(
@@ -654,7 +681,13 @@ def generate_corruption_dataset(
     tasks = [(c, images_np, SEVERITIES, output_dir, seed) for c in CORRUPTIONS]
     num_cpus = os.cpu_count()
 
-    from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
 
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -729,16 +762,13 @@ def generate_domain_dataset(
         )
         for style in styles_list:
             for str_val in strengths:
-                strength_dir = output_dir / style / str(str_val)
-                for c in range(DatasetClass.NUM_CLASSES):
-                    ensure_dir(strength_dir / f"class_{c:04d}")
+                get_logger().info(f"   [cpu] 生成: {style} (strength={str_val})...")
                 styled = generator.apply_batch(
                     images_np, style, str_val, batch_size=batch_size
                 )
-                for i, (img, lbl) in enumerate(zip(styled, labels_np)):
-                    Image.fromarray(img).save(
-                        str(strength_dir / f"class_{lbl:04d}" / f"img_{i}.png")
-                    )
+                ensure_dir(output_dir / style)
+                save_path = output_dir / style / f"{str_val}.npy"
+                np.save(str(save_path), styled.astype(np.uint8))
     else:
         # GPU 并行模式
         processes = []
@@ -769,8 +799,13 @@ def generate_domain_dataset(
         for p in processes:
             p.join()
 
+    # 保存对应的 labels.npy，方便加载
+    np.save(str(output_dir / "labels.npy"), labels_np)
+
     elapsed = time.time() - start_time
-    get_logger().info(f"✅ {DatasetClass.NAME}-Domain 生成完成! ⏱️ 耗时: {elapsed:.1f}s ({elapsed/60:.1f}分钟)")
+    get_logger().info(
+        f"✅ {DatasetClass.NAME}-Domain 生成完成! ⏱️ 耗时: {elapsed:.1f}s ({elapsed / 60:.1f}分钟)"
+    )
     return output_dir
 
 
@@ -859,7 +894,11 @@ def generate_ood_dataset(
 
 
 def visualize_corruption(
-    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None, seed: int = 42
+    dataset_name: str,
+    root: str = "./data",
+    num_vis: int = 8,
+    gen_cfg=None,
+    seed: int = 42,
 ):
     """为 Corruption 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
@@ -875,7 +914,9 @@ def visualize_corruption(
 
     get_logger().info("🎨 正在生成 Corruption 可视化对比图...")
 
-    vis_corruptions = gen_cfg.vis_corruptions if gen_cfg else ["gaussian_noise", "fog", "glass_blur"]
+    vis_corruptions = (
+        gen_cfg.vis_corruptions if gen_cfg else ["gaussian_noise", "fog", "glass_blur"]
+    )
 
     for c in vis_corruptions:
         for s in SEVERITIES:
@@ -892,7 +933,11 @@ def visualize_corruption(
 
 
 def visualize_domain(
-    dataset_name: str, root: str = "./data", num_vis: int = 8, gen_cfg=None, seed: int = 42
+    dataset_name: str,
+    root: str = "./data",
+    num_vis: int = 8,
+    gen_cfg=None,
+    seed: int = 42,
 ):
     """为 Domain Shift 生成可视化对比图"""
     DatasetClass = DATASET_REGISTRY[dataset_name]
@@ -1006,11 +1051,19 @@ def _execute_generation(args, config):
 def _execute_visualization(args, config):
     if args.type == "corruption":
         visualize_corruption(
-            args.dataset, config.data_root, config.generation.num_vis, config.generation, config.seed
+            args.dataset,
+            config.data_root,
+            config.generation.num_vis,
+            config.generation,
+            config.seed,
         )
     elif args.type == "domain":
         visualize_domain(
-            args.dataset, config.data_root, config.generation.num_vis, config.generation, config.seed
+            args.dataset,
+            config.data_root,
+            config.generation.num_vis,
+            config.generation,
+            config.seed,
         )
     elif args.type == "ood":
         visualize_ood(args.dataset, config.data_root, config.generation.num_vis)

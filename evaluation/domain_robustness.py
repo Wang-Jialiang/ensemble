@@ -65,15 +65,8 @@ def evaluate_domain_shift(
         "num_samples": len(targets),
         "domain_acc": metrics["ensemble_acc"],
         "domain_balanced_acc": metrics["balanced_acc"],
-        "domain_worst_class_acc": metrics["worst_class_acc"],
-        "domain_avg_individual_acc": metrics["avg_individual_acc"],
-        # 集成 vs 单模型的提升
-        "domain_ensemble_gain": metrics["ensemble_acc"] - metrics["avg_individual_acc"],
     }
 
-    logger.info(f"   ✅ Domain Shift Results ({domain_name}):")
-    logger.info(f"      Ensemble Acc: {results['domain_acc']:.2f}%")
-    logger.info(f"      Balanced Acc: {results['domain_balanced_acc']:.2f}%")
-    logger.info(f"      Ensemble Gain: {results['domain_ensemble_gain']:+.2f}%")
+    logger.info(f"   ✅ {domain_name}: Acc={results['domain_acc']:.2f}%, Balanced={results['domain_balanced_acc']:.2f}%")
 
     return results

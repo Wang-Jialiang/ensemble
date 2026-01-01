@@ -119,6 +119,8 @@ class Config:
     corruption_dataset: bool  # 是否加载 Corruption 数据集进行评估
     ood_dataset: bool  # 是否加载 OOD 数据集进行评估
     domain_dataset: bool  # 是否加载 Domain Shift 数据集进行评估
+    eval_run_gradcam: bool  # 是否在评估时运行 Grad-CAM 分析
+    eval_run_landscape: bool  # 是否在评估时运行 Loss Landscape 分析
 
     # ==========================================================================
     # [评估专用] 对抗鲁棒性评估参数 - 仅评估模块使用
@@ -126,6 +128,8 @@ class Config:
     adv_eps: float  # FGSM/PGD 扰动强度 ε (常用值: 8/255 ≈ 0.031)
     adv_alpha: float  # PGD 步长 α (常用值: 2/255 ≈ 0.008)
     adv_pgd_steps: int  # PGD 迭代步数 (常用值: 10, 20)
+    adv_eps_list: Optional[List[float]] = None  # 多 ε 评估列表 (可选)
+    adv_targeted: bool = False  # 是否为针对性攻击
 
     # ==========================================================================
     # [全局] 优化器高级参数 - SGD 专用
@@ -148,9 +152,6 @@ class Config:
     # [评估专用] 可视化参数
     # ==========================================================================
     plot_dpi: int  # 图表保存 DPI (默认 300)
-    landscape_steps_1d: int  # Loss Landscape 1D 插值步数
-    landscape_steps_2d: int  # Loss Landscape 2D 采样步数
-    landscape_distance: float  # Loss Landscape 2D 采样距离
     gradcam_num_samples: int  # Grad-CAM 分析样本数
 
     # ==========================================================================

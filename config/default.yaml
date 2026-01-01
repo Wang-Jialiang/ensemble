@@ -26,9 +26,16 @@ constants:
   seed: 42                          # 随机种子 (复现性标准值)
 
   # 对抗鲁棒性评估 (Madry et al., 2018; RobustBench)
-  adv_eps: 0.03137                  # ε = 8/255
+  adv_eps: 0.03137                  # ε = 8/255 (单值评估时使用)
   adv_alpha: 0.00784                # α = 2/255
   adv_pgd_steps: 10                 # PGD 标准迭代数
+  
+  # 多 ε 评估 (传入列表即启用多 ε 评估模式)
+  # adv_eps_list: [0.00784, 0.01569, 0.03137, 0.06275]  # [2/255, 4/255, 8/255, 16/255]
+  adv_eps_list: null                # null = 仅用 adv_eps 单值; 列表 = 多 ε 评估
+  
+  # 针对性攻击 (targeted attack)
+  adv_targeted: false               # true = 针对性攻击 (最小化到目标类); false = 非针对性攻击
 
   # 校准度评估 (Guo et al., 2017)
   ece_n_bins: 15                    # ECE 分箱数
@@ -40,11 +47,6 @@ constants:
 
   # 可视化
   plot_dpi: 300                     # 图表保存 DPI
-
-  # Loss Landscape 可视化参数
-  landscape_steps_1d: 50            # 1D 插值步数
-  landscape_steps_2d: 40            # 2D 平面采样步数
-  landscape_distance: 1.0           # 2D 平面采样距离
 
   # Grad-CAM 分析参数
   gradcam_num_samples: 50           # Grad-CAM 分析样本数
@@ -119,6 +121,8 @@ base:
   corruption_dataset: true          # 是否加载 Corruption 数据集进行评估
   ood_dataset: true                 # 是否加载 OOD 数据集进行评估
   domain_dataset: true              # 是否加载 Domain Shift 数据集进行评估
+  eval_run_gradcam: true            # 是否在评估时运行 Grad-CAM 分析
+  eval_run_landscape: true          # 是否在评估时运行 Loss Landscape 分析
 
   # ==========================================================================
   # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用
@@ -153,24 +157,6 @@ experiments:
     augmentation_method: "none"
     use_curriculum: false
 
-  - name: "ExpB_Cutout_Fixed"
-    desc: "Cutout Fixed (ratio=25%, prob=50%)"
-    augmentation_method: "cutout"
-    use_curriculum: false
-    fixed_ratio: 0.25
-    fixed_prob: 0.5
-
-  - name: "ExpC_Perlin_Fixed"
-    desc: "Perlin Fixed (ratio=25%, prob=50%)"
-    augmentation_method: "perlin"
-    use_curriculum: false
-    fixed_ratio: 0.25
-    fixed_prob: 0.5
-
-  - name: "ExpE_Cutout_Curriculum"
-    desc: "Cutout + Dual Curriculum"
-    augmentation_method: "cutout"
-    use_curriculum: true
 
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
@@ -182,15 +168,6 @@ eval_checkpoints:
   - name: "ExpB_Cutout_Fixed"
     path: "./outputs/exp_latest/checkpoints/ExpB_Cutout_Fixed/best"
 
-  - name: "ExpC_Perlin_Fixed"
-    path: "./outputs/exp_latest/checkpoints/ExpC_Perlin_Fixed/best"
-
-  - name: "ExpD_Perlin_Curriculum"
-    path: "./outputs/exp_latest/checkpoints/ExpD_Perlin_Curriculum/best"
-
-  - name: "ExpE_Cutout_Curriculum"
-    path: "./outputs/exp_latest/checkpoints/ExpE_Cutout_Curriculum/best"
-
 # ==============================================================================
 # 数据生成配置 (generate.py 使用)
 # ==============================================================================
@@ -200,9 +177,9 @@ generation:
   lightning_ckpt: "sdxl_lightning_4step_unet.safetensors"  # 4-step UNet 检查点
   num_steps: 4                                             # 推理步数 (2/4/8)
   batch_size: 12                                           # 启用VAE优化后可提高
-  samples_per_group: 500                                   # 每组样本数 (500足够评估)
+  samples_per_group: 100                                  # 每组样本数 (500足够评估)
   visualize: true                                          # 是否生成可视化对比图
-  num_vis: 5                                              # 每个类别/风格可视化的样本数
+  num_vis: 1                                              # 每个类别/风格可视化的样本数
 
   # SDXL 生成参数
   sdxl_height: 1024                                        # Text2Img 原始输出高度
@@ -222,7 +199,7 @@ generation:
     watercolor: "watercolor painting art"
 
   # Domain Shift 强度
-  strengths: [0.3, 0.5, 0.7]
+  strengths: [0.5, 0.7]
 
   # OOD Prompts (Text2Img)
   ood_prompts:
