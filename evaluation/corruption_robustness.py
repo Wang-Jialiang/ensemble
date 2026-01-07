@@ -30,7 +30,7 @@ def evaluate_corruption(
 ) -> Dict[str, Any]:
     """
     通用 Corruption 鲁棒性评估
-    
+
     Returns:
         {
             "by_severity": {1: 85.2, 3: 72.1, 5: 58.3},  # 各强度平均 acc
@@ -46,16 +46,13 @@ def evaluate_corruption(
     n_severities = len(corruption_dataset.SEVERITIES)
     total_evals = n_severities * n_corruptions
 
-    logger.info(f"\n🧪 Running Corruption Evaluation on {dataset_name}")
-    logger.info(
-        f"   📊 {n_corruptions} corruptions × {n_severities} severities = {total_evals} 次评估"
-    )
+    logger.info(f"🧪 Corruption Eval ({dataset_name})")
 
     models, device = get_models_from_source(trainer_or_models)
-    
+
     # 存储详细结果用于汇总
     detail_results = {}  # {severity: {corruption: acc}}
-    
+
     pbar = tqdm(total=total_evals, desc="Corruption Eval", leave=False)
 
     for severity in corruption_dataset.SEVERITIES:
@@ -82,13 +79,13 @@ def evaluate_corruption(
 
     # ========== 汇总结果 ==========
     results = {}
-    
+
     # 1. 按 severity 汇总
     by_severity = {}
     for sev in corruption_dataset.SEVERITIES:
         by_severity[sev] = np.mean(list(detail_results[sev].values()))
     results["by_severity"] = by_severity
-    
+
     # 2. 按四大类汇总 (跨所有 severity 平均)
     by_category = {}
     for cat_name, corruptions in corruption_dataset.CATEGORIES.items():
@@ -99,10 +96,8 @@ def evaluate_corruption(
                     cat_accs.append(detail_results[sev][c])
         by_category[cat_name] = np.mean(cat_accs) if cat_accs else 0.0
     results["by_category"] = by_category
-    
+
     # 3. 总体平均
     results["overall_avg"] = np.mean(list(by_severity.values()))
-    
-    logger.info(f"   ✅ 完成! Overall Avg: {results['overall_avg']:.2f}%")
-    return results
 
+    return results

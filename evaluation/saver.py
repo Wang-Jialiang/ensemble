@@ -54,7 +54,9 @@ class ResultsSaver:
                 results,
                 f,
                 indent=2,
-                default=lambda x: x.item() if hasattr(x, "item") else x,
+                default=lambda x: x.tolist()
+                if hasattr(x, "tolist")
+                else (x.item() if hasattr(x, "item") else x),
             )
 
         csv_path = self.save_dir / f"{filename}.csv"

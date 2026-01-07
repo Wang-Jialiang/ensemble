@@ -7,17 +7,16 @@ GPUWorker (单GPU模型管理器)、HistorySaver (训练历史保存器)
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.amp import autocast
 
 from ..config import Config
 from ..models import ModelFactory
 from ..utils import ensure_dir, get_logger
-from .augmentation import AUGMENTATION_REGISTRY, AugmentationMethod
+from .augmentation import AUGMENTATION_REGISTRY
 from .optimization import create_optimizer, create_scheduler
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -31,7 +30,13 @@ class GPUWorker:
     管理单个GPU上的多个模型实例，支持异步训练以最大化GPU利用率。
     """
 
-    def __init__(self, gpu_id: int, num_models: int, cfg: Config, augmentation_method: str = "perlin"):
+    def __init__(
+        self,
+        gpu_id: int,
+        num_models: int,
+        cfg: Config,
+        augmentation_method: str = "perlin",
+    ):
         """GPU Worker 构造函数 (大纲化)"""
         self.gpu_id = gpu_id
         self.device = torch.device(f"cuda:{gpu_id}")
@@ -51,23 +56,34 @@ class GPUWorker:
         """批量创建模型及配套优化工具"""
         ms, os, ss = [], [], []
         for _ in range(self.num_models):
-            m = ModelFactory.create_model(self.cfg.model_name, self.cfg.num_classes, self.cfg.init_method).to(self.device)
-            if self.cfg.compile_model and hasattr(torch, "compile"): m = torch.compile(m)
-            
-            opt = create_optimizer(m, self.cfg.optimizer, self.cfg.lr, self.cfg.weight_decay, sgd_momentum=self.cfg.sgd_momentum)
+            m = ModelFactory.create_model(
+                self.cfg.model_name, self.cfg.num_classes, self.cfg.init_method
+            ).to(self.device)
+            if self.cfg.compile_model and hasattr(torch, "compile"):
+                m = torch.compile(m)
+
+            opt = create_optimizer(
+                m,
+                self.cfg.optimizer,
+                self.cfg.lr,
+                self.cfg.weight_decay,
+                sgd_momentum=self.cfg.sgd_momentum,
+            )
             sch = create_scheduler(opt, self.cfg.scheduler, self.cfg.total_epochs)
-            
-            ms.append(m); os.append(opt); ss.append(sch)
+
+            ms.append(m)
+            os.append(opt)
+            ss.append(sch)
         return ms, os, ss
 
     def _init_augmentation(self, method):
         """配置增强实例及其固定种子池"""
         if method not in AUGMENTATION_REGISTRY:
             raise ValueError(f"不支持的增强方法: {method}")
-            
+
         self.augmentation = AUGMENTATION_REGISTRY[method](self.device, self.cfg)
         self._use_model_level = self.cfg.model_level_augmentation
-        
+
         if self._use_model_level:
             self.augmentation.init_model_seeds(num_models=self.num_models)
 
@@ -82,9 +98,11 @@ class GPUWorker:
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)
 
-    def train_batch_async(self, inputs, targets, criterion, m_ratio, m_prob, use_mask, model_indices=None):
+    def train_batch_async(
+        self, inputs, targets, criterion, m_ratio, m_prob, use_mask, model_indices=None
+    ):
         """执行异步批次训练 (大纲化)
-        
+
         Args:
             model_indices: 可选，指定要训练的模型索引列表。None 表示训练全部模型。
         """
@@ -94,23 +112,42 @@ class GPUWorker:
             targets = targets.to(self.device, non_blocking=True)
 
             # 2. 确定要训练的模型
-            indices = list(model_indices) if model_indices is not None else list(range(self.num_models))
-            
+            indices = (
+                list(model_indices)
+                if model_indices is not None
+                else list(range(self.num_models))
+            )
+
             # 3. 迭代指定的模型
             total_loss = 0.0
             for i in indices:
                 m, opt = self.models[i], self.optimizers[i]
-                total_loss += self._step_model(i, m, opt, inputs, targets, criterion, m_ratio, m_prob, use_mask)
+                total_loss += self._step_model(
+                    i, m, opt, inputs, targets, criterion, m_ratio, m_prob, use_mask
+                )
 
             self._pending_loss = total_loss / len(indices) if len(indices) > 0 else 0.0
 
-    def _step_model(self, idx, model, optimizer, inputs, targets, criterion, m_ratio, m_prob, use_mask):
+    def _step_model(
+        self,
+        idx,
+        model,
+        optimizer,
+        inputs,
+        targets,
+        criterion,
+        m_ratio,
+        m_prob,
+        use_mask,
+    ):
         """执行单个模型的梯度更新步"""
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
         # 1. 准备增强数据
-        x, y = self._prepare_training_data(idx, inputs, targets, m_ratio, m_prob, use_mask)
+        x, y = self._prepare_training_data(
+            idx, inputs, targets, m_ratio, m_prob, use_mask
+        )
 
         # 2. 执行前向与反向传播
         loss = self._forward_backward(model, x, y, criterion)
@@ -118,13 +155,14 @@ class GPUWorker:
         # 3. 梯度裁剪与参数更新
         nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
         optimizer.step()
-        
+
         return loss.item()
 
     def _prepare_training_data(self, idx, x, y, ratio, prob, use_mask):
         """根据策略应用数据增强"""
-        if not use_mask: return x, y
-        
+        if not use_mask:
+            return x, y
+
         model_idx = idx if self._use_model_level else None
         return self.augmentation.apply(x, y, ratio, prob, model_index=model_idx)
 
@@ -135,7 +173,7 @@ class GPUWorker:
                 loss = criterion(model(x), y)
         else:
             loss = criterion(model(x), y)
-            
+
         loss.backward()
         return loss
 
@@ -221,15 +259,17 @@ class HistorySaver:
     def save(self, history: Dict[str, List], filename: str = "history"):
         """将历史字典导出至 CSV 文件"""
         import csv
+
         path = self.save_dir / f"{filename}.csv"
-        
-        if not history: return
+
+        if not history:
+            return
 
         with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=history.keys())
             writer.writeheader()
             self._write_rows(writer, history)
-            
+
         get_logger().info(f"💾 History saved: {path}")
 
     def _write_rows(self, writer, history):

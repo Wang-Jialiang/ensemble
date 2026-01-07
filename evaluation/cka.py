@@ -3,7 +3,7 @@
 CKA (Centered Kernel Alignment) 相似度模块
 ================================================================================
 
-包含: linear_cka, compute_ensemble_cka
+包含: _linear_cka (内部), compute_ensemble_cka
 """
 
 from typing import Dict
@@ -16,7 +16,7 @@ import torch
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
+def _linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     """计算两个特征矩阵的 Linear CKA 相似度
 
     CKA (Centered Kernel Alignment) 用于衡量两个模型的表示相似度。
@@ -80,7 +80,7 @@ def compute_ensemble_cka(all_features: torch.Tensor) -> Dict[str, float]:
             # 使用隐藏层特征作为表示
             X = all_features[i]  # [num_samples, feature_dim]
             Y = all_features[j]
-            cka = linear_cka(X, Y)
+            cka = _linear_cka(X, Y)
             cka_values.append(cka)
 
     avg_cka = np.mean(cka_values)

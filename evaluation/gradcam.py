@@ -3,7 +3,7 @@
 Grad-CAM 分析模块
 ================================================================================
 
-包含: GradCAM, GradCAMAnalyzer, ModelListWrapper
+包含: _GradCAM (内部), GradCAMAnalyzer, ModelListWrapper
 """
 
 from typing import Any, Dict, List
@@ -53,7 +53,7 @@ def _get_target_layer(model: nn.Module, model_name: str) -> nn.Module:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-class GradCAM:
+class _GradCAM:
     """
     Grad-CAM (Gradient-weighted Class Activation Mapping) - 基于 pytorch-grad-cam 库
 
@@ -187,7 +187,7 @@ class GradCAMAnalyzer:
                 model.eval()
                 device = next(model.parameters()).device
                 target_layer = _get_target_layer(model, self.model_name)
-                gradcam = GradCAM(model, target_layer)
+                gradcam = _GradCAM(model, target_layer)
 
                 model_cams = []
                 model_preds = []

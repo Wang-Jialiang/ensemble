@@ -7,7 +7,7 @@
 - base: BasePreloadedDataset 基类
 - preloaded: PreloadedCIFAR10, PreloadedEuroSAT, DATASET_REGISTRY
 - loader: load_dataset
-- robustness/: 鲁棒性评估数据集子包 (corruption, domain, ood, generate)
+- robustness/: 鲁棒性评估数据集子包 (corruption, ood, generate)
 
 使用方式:
     from ensemble.datasets import load_dataset, DATASET_REGISTRY

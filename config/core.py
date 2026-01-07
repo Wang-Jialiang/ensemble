@@ -11,12 +11,10 @@ from typing import List, Optional
 
 import torch
 
-from ..utils import ensure_dir
-
 
 @dataclass
 class GenerationConfig:
-    """数据生成配置 (Corruption / Domain / OOD) - SDXL Lightning"""
+    """数据生成配置 (Corruption / OOD) - SDXL Lightning"""
 
     base_model: str = ""  # SDXL 基础模型 (由 yaml 填充)
     lightning_repo: str = ""  # Lightning UNet 仓库
@@ -30,12 +28,8 @@ class GenerationConfig:
     # SDXL 生成参数
     sdxl_height: int = 1024  # Text2Img 原始输出高度
     sdxl_width: int = 1024  # Text2Img 原始输出宽度
-    img2img_size: int = 512  # Img2Img 中间处理尺寸
-    guidance_scale_img2img: float = 4.5  # Img2Img CFG
     guidance_scale_text2img: float = 0.0  # Text2Img CFG
 
-    styles: dict = field(default_factory=dict)  # 由 default.yaml 填充
-    strengths: List[float] = field(default_factory=list)  # 由 default.yaml 填充
     ood_prompts: List[str] = field(default_factory=list)  # 由 default.yaml 填充
     vis_corruptions: List[str] = field(default_factory=list)  # 由 default.yaml 填充
 
@@ -106,10 +100,10 @@ class Config:
     # ==========================================================================
     save_every_n_epochs: int  # 每 N 轮保存一次检查点
     keep_last_n_checkpoints: int  # 保留最近 N 个检查点
-    use_tensorboard: bool  # 是否启用 TensorBoard 日志
     use_wandb: bool  # 是否启用 Weights & Biases 日志
     wandb_project: str  # wandb 项目名称
     log_level: str  # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
+    log_to_console: bool  # 训练日志是否同时输出到控制台 (默认 True)
 
     # ==========================================================================
     # [评估专用] 评估配置 - 仅评估模块使用
@@ -118,7 +112,6 @@ class Config:
     ensemble_strategy: str  # 集成策略: "mean" (等权平均), "voting" (多数投票)
     corruption_dataset: bool  # 是否加载 Corruption 数据集进行评估
     ood_dataset: bool  # 是否加载 OOD 数据集进行评估
-    domain_dataset: bool  # 是否加载 Domain Shift 数据集进行评估
     eval_run_gradcam: bool  # 是否在评估时运行 Grad-CAM 分析
     eval_run_landscape: bool  # 是否在评估时运行 Loss Landscape 分析
 
@@ -128,8 +121,6 @@ class Config:
     adv_eps: float  # FGSM/PGD 扰动强度 ε (常用值: 8/255 ≈ 0.031)
     adv_alpha: float  # PGD 步长 α (常用值: 2/255 ≈ 0.008)
     adv_pgd_steps: int  # PGD 迭代步数 (常用值: 10, 20)
-    adv_eps_list: Optional[List[float]] = None  # 多 ε 评估列表 (可选)
-    adv_targeted: bool = False  # 是否为针对性攻击
 
     # ==========================================================================
     # [全局] 优化器高级参数 - SGD 专用
@@ -172,12 +163,22 @@ class Config:
     fixed_ratio: float  # 固定遮挡比例 (仅 use_curriculum=False 时生效)
     fixed_prob: float  # 固定遮挡概率 (仅 use_curriculum=False 时生效)
     share_warmup_backbone: bool  # 是否在 warmup 后共享 backbone
+
+    # ==========================================================================
+    # 有默认值的字段 (必须放在最后)
+    # ==========================================================================
+    adv_eps_list: Optional[List[float]] = None  # 多 ε 评估列表 (可选)
+    adv_targeted: bool = False  # 是否为针对性攻击
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     # 自动计算/生成字段 (有默认值, 禁止人工初始化)
-    save_dir: str = field(
+    save_dir: str = field(default="", init=False)  # 保持向后兼容，默认指向 training_dir
+    training_dir: str = field(
         default="", init=False
-    )  # 检查点保存目录 (由 __post_init__ 自动生成)
+    )  # 训练产物目录: output/training/{exp_name}/
+    evaluation_dir: str = field(
+        default="", init=False
+    )  # 评估产物目录: output/evaluation/{exp_name}_{ts}/
     num_classes: int = field(default=0, init=False)
     image_size: int = field(default=0, init=False)
     dataset_mean: List[float] = field(
@@ -213,6 +214,21 @@ class Config:
             num_models_per_gpu=1,
         )
 
+    def save(self, filename: str = "config.yaml"):
+        """保存当前配置到文件"""
+        import yaml
+
+        path = Path(self.save_dir) / filename
+        # 转换为字典并过滤掉不可序列化的字段
+        data = {
+            k: v
+            for k, v in asdict(self).items()
+            if not callable(v) and k not in ("_experiments", "_eval_ckpts")
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+
     @classmethod
     def load_yaml(cls, yaml_path: str) -> tuple["Config", List["Experiment"], list]:
         """加载层级配置: constants -> base -> generation"""
@@ -236,12 +252,17 @@ class Config:
         self._setup_hardware()
         self._auto_configure_for_dataset()
 
-        # 自动生成实验目录
+        # 自动生成实验目录路径 (按阶段分离，但不立即创建)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.save_dir = str(
-            Path(self.save_root) / f"{self.experiment_name or 'exp'}_{ts}"
-        )
-        ensure_dir(self.save_dir)
+        exp_name = self.experiment_name or "exp"
+
+        # 主目录结构: output/training/{exp_name}/ 和 output/evaluation/{ts}/
+        self.training_dir = str(Path(self.save_root) / "training" / exp_name)
+        self.evaluation_dir = str(Path(self.save_root) / "evaluation" / ts)
+
+        # save_dir 保持向后兼容，默认指向 training_dir
+        self.save_dir = self.training_dir
+        # 注意: 目录创建由调用方负责 (main.py 中的 ensure_dir)
 
     def _setup_hardware(self):
         """硬件资源探测"""

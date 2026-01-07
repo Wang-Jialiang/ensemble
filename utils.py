@@ -7,34 +7,43 @@
 import datetime
 import logging
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 日志系统                                                                     ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
-
-
 from rich.console import Console
-from rich.logging import RichHandler
 from rich.traceback import install
 
 # 全局 Console 对象
 console = Console()
-# 自动接管异常显示 (带局部变量显示)
-install(show_locals=True)
+# 自动接管异常显示 (关闭局部变量显示以减少输出)
+install(show_locals=False)
 
 
-def get_logger(level: int = logging.INFO, file: str = None) -> logging.Logger:
-    """获取单例 NDE Logger (强制集成 Rich)"""
+def get_logger(
+    level: int = logging.INFO, file: str = None, console: bool = True
+) -> logging.Logger:
+    """获取单例 NDE Logger (强制集成 Rich)
+
+    Args:
+        level: 日志级别
+        file: 日志文件路径（可选）
+        console: 是否输出到控制台，默认 True
+    """
     log = logging.getLogger("NDE")
     if log.handlers:
         return log
 
     log.setLevel(level)
 
-    # 终端输出: 强制使用 RichHandler
-    rh = RichHandler(console=console, rich_tracebacks=True, show_path=True)
-    log.addHandler(rh)
+    # 终端输出: 使用 RichHandler (可选)
+    if console:
+        from rich.console import Console
+        from rich.logging import RichHandler
+
+        rh = RichHandler(console=Console(), rich_tracebacks=True, show_path=True)
+        log.addHandler(rh)
 
     # 文件输出 (保持标准格式)
     if file:

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from ...utils import get_logger
 from ..preloaded import DATASET_REGISTRY
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -96,6 +97,7 @@ class CorruptionDataset:
                 f"未知数据集: {dataset_name}. 可用: {list(DATASET_REGISTRY.keys())}"
             )
 
+        self.name = dataset_name  # 保存名称供评估使用
         DatasetClass = DATASET_REGISTRY[dataset_name]
         self.data_dir = Path(root) / f"{DatasetClass.NAME}-C"
 
@@ -127,20 +129,76 @@ class CorruptionDataset:
         self, corruption_type: str, severity: int, config: "Config"
     ) -> DataLoader:
         """获取特定损坏类型和严重程度的数据加载器"""
+
         # 1. 解析目标类型
         target_types = self._resolve_types(corruption_type)
 
         # 2. 收集数据批次
         all_data, all_labels = [], []
+        total_samples = len(self.labels)
+
         for c_type in target_types:
+            # 加载图像数据
             data = self._load_corruption(c_type, severity)
+
+            # 判断是否为完整数据 - 如果数据大小等于 labels 大小，说明是 Full 模式
+            # 如果数据大小小于 labels，说明是 Balanced Slicing 模式，需要切分 labels
+            if len(data) == total_samples:
+                # Full Mode
+                current_labels = self.labels
+            else:
+                # Balanced Mode: 计算该 corruption 对应的 slice
+                slice_obj = self._get_slice_indices(c_type, total_samples)
+                current_labels = self.labels[slice_obj]
+
+                # 简单校验
+                if len(data) != len(current_labels):
+                    # 容错: 如果切片计算有细微误差 (e.g. 尾部处理), 尝试以数据长度为准
+                    # 这通常不应该发生，除非 generate.py 逻辑变更
+                    get_logger().warning(
+                        f"Data/Label Mismatch for {c_type}: Data={len(data)}, LabelSlice={len(current_labels)}. "
+                        "Using data length."
+                    )
+                    # 重新对齐: 如果数据少，就再切 label；如果数据多(不可能)，就报错
+                    current_labels = current_labels[: len(data)]
+
             all_data.append(data)
-            all_labels.append(self.labels)
+            all_labels.append(current_labels)
 
         # 3. 组装 DataLoader
         return self._prepare_dataloader(
             torch.cat(all_data, dim=0), torch.cat(all_labels, dim=0), config
         )
+
+    def _get_slice_indices(self, corruption_type: str, total_samples: int) -> slice:
+        """根据 Corruption 类型和总样本数，计算其在 Balanced 模式下的数据切片"""
+        import math
+
+        # 找到该 corruption 所属的 category 及其索引
+        found_cat, found_list = None, None
+        for cat, c_list in self.CATEGORIES.items():
+            if corruption_type in c_list:
+                found_cat = cat
+                found_list = c_list
+                break
+
+        if not found_cat:
+            # Should not happen if _resolve_types works
+            return slice(0, total_samples)
+
+        num_types = len(found_list)
+        chunk_size = math.ceil(total_samples / num_types)
+        idx_in_cat = found_list.index(corruption_type)
+
+        start_idx = idx_in_cat * chunk_size
+        end_idx = min((idx_in_cat + 1) * chunk_size, total_samples)
+
+        # 边界修正 (同 generate.py)
+        if start_idx >= total_samples:
+            start_idx = total_samples
+            end_idx = total_samples
+
+        return slice(start_idx, end_idx)
 
     def _resolve_types(self, corruption_type: str) -> list:
         """解析输入的类型名称(单类或具体类型)"""

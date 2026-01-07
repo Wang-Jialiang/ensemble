@@ -10,9 +10,8 @@ from typing import List, Optional
 
 import torch.nn as nn
 
-from .init import INIT_REGISTRY, apply_init, get_supported_inits
+from .init import apply_init  # 只导入 factory 实际使用的
 from .resnet import BasicBlock, Bottleneck, ResNet
-
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 模型注册表                                                                   ║
@@ -61,12 +60,14 @@ def resnet50(num_classes: int):
 @register_model("vgg16")
 def vgg16(num_classes: int):
     from .wrappers import VGG16Wrapper
+
     return VGG16Wrapper(num_classes=num_classes)
 
 
 @register_model("efficientnet_b0")
 def efficientnet_b0(num_classes: int):
     from .wrappers import EfficientNetB0Wrapper
+
     return EfficientNetB0Wrapper(num_classes=num_classes)
 
 
@@ -79,7 +80,9 @@ class ModelFactory:
     """模型生产工厂 (大纲化)"""
 
     @staticmethod
-    def create_model(name: str, num_classes: int = 10, init: Optional[str] = None, **kwargs) -> nn.Module:
+    def create_model(
+        name: str, num_classes: int = 10, init: Optional[str] = None, **kwargs
+    ) -> nn.Module:
         """核心生产线: 路由 -> 实例化 -> 初始化"""
         name = name.lower()
 
@@ -91,7 +94,8 @@ class ModelFactory:
         model = MODEL_REGISTRY[name](num_classes, **kwargs)
 
         # 3. 策略初始化 (可选)
-        if init: apply_init(model, init)
+        if init:
+            apply_init(model, init)
 
         return model
 

@@ -3,10 +3,10 @@
 对抗鲁棒性评估模块
 ================================================================================
 
-包含: FGSM 攻击、PGD 攻击、对抗鲁棒性评估
+包含: _fgsm_attack, _pgd_attack (内部), evaluate_adversarial
 """
 
-from typing import Dict
+from typing import Dict, List, Union
 
 import torch
 import torch.nn as nn
@@ -30,10 +30,10 @@ def _get_norm_params(eps, alpha, mean, std):
     )
 
 
-def fgsm_attack(model, images, labels, eps, mean, std, targeted=False) -> torch.Tensor:
+def _fgsm_attack(model, images, labels, eps, mean, std, targeted=False) -> torch.Tensor:
     """
     FGSM 攻击
-    
+
     Args:
         targeted: 若为 True，labels 应为目标标签，执行针对性攻击
     """
@@ -49,11 +49,12 @@ def fgsm_attack(model, images, labels, eps, mean, std, targeted=False) -> torch.
     return torch.max(torch.min(adv, upper), lower).detach()
 
 
-
-def pgd_attack(model, images, labels, eps, alpha, steps, mean, std, targeted=False) -> torch.Tensor:
+def _pgd_attack(
+    model, images, labels, eps, alpha, steps, mean, std, targeted=False
+) -> torch.Tensor:
     """
     PGD 攻击
-    
+
     Args:
         targeted: 若为 True，labels 应为目标标签，执行针对性攻击
     """
@@ -62,7 +63,7 @@ def pgd_attack(model, images, labels, eps, alpha, steps, mean, std, targeted=Fal
 
     # targeted: 梯度下降靠近目标; untargeted: 梯度上升远离真实标签
     sign = -1 if targeted else 1
-    
+
     for _ in range(steps):
         adv.requires_grad_(True)
         loss = F.cross_entropy(model(adv), labels)
@@ -75,23 +76,29 @@ def pgd_attack(model, images, labels, eps, alpha, steps, mean, std, targeted=Fal
     return adv
 
 
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 攻击方式扩展 (TODO)                                                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
 def cw_attack(
-    model, images, labels, c: float = 1.0, kappa: float = 0.0, 
-    steps: int = 1000, lr: float = 0.01, mean=None, std=None
+    model,
+    images,
+    labels,
+    c: float = 1.0,
+    kappa: float = 0.0,
+    steps: int = 1000,
+    lr: float = 0.01,
+    mean=None,
+    std=None,
 ) -> torch.Tensor:
     """
     C&W (Carlini & Wagner) L2 攻击 - TODO
-    
+
     基于优化的攻击方法，最小化 L2 扰动同时使模型误分类。
-    
+
     参考论文: "Towards Evaluating the Robustness of Neural Networks" (Carlini & Wagner, 2017)
-    
+
     Args:
         model: 目标模型
         images: 输入图像 [B, C, H, W]
@@ -101,7 +108,7 @@ def cw_attack(
         steps: 优化迭代次数
         lr: 学习率
         mean, std: 数据集标准化参数
-    
+
     Returns:
         对抗样本 [B, C, H, W]
     """
@@ -109,17 +116,23 @@ def cw_attack(
 
 
 def auto_attack(
-    model, images, labels, eps: float, norm: str = "Linf",
-    version: str = "standard", mean=None, std=None
+    model,
+    images,
+    labels,
+    eps: float,
+    norm: str = "Linf",
+    version: str = "standard",
+    mean=None,
+    std=None,
 ) -> torch.Tensor:
     """
     AutoAttack - 当前最强对抗评估基准 - TODO
-    
+
     组合多种攻击: APGD-CE, APGD-DLR, FAB, Square Attack
-    
-    参考论文: "Reliable evaluation of adversarial robustness with an ensemble of diverse 
+
+    参考论文: "Reliable evaluation of adversarial robustness with an ensemble of diverse
               parameter-free attacks" (Croce & Hein, 2020)
-    
+
     Args:
         model: 目标模型
         images: 输入图像 [B, C, H, W]
@@ -128,10 +141,10 @@ def auto_attack(
         norm: 范数类型 ("Linf" 或 "L2")
         version: 版本 ("standard", "plus", "rand")
         mean, std: 数据集标准化参数
-    
+
     Returns:
         对抗样本 [B, C, H, W]
-    
+
     安装: pip install autoattack
     """
     raise NotImplementedError("AutoAttack 尚未实现，请安装 autoattack 库")
@@ -147,17 +160,18 @@ def auto_attack(
 
 
 def evaluate_adversarial(
-    trainer_or_models, loader, 
-    eps: Union[float, List[float]] = None, 
-    alpha: float = None, 
-    steps: int = None, 
-    dataset: str = None, 
-    cfg=None, 
-    logger=None
+    trainer_or_models,
+    loader,
+    eps: Union[float, List[float]] = None,
+    alpha: float = None,
+    steps: int = None,
+    dataset: str = None,
+    cfg=None,
+    logger=None,
 ) -> Dict:
     """
     集成对抗鲁棒性评估
-    
+
     Args:
         trainer_or_models: Trainer 对象或模型列表
         loader: 测试数据 DataLoader
@@ -170,7 +184,7 @@ def evaluate_adversarial(
         dataset: 数据集名称 (可选，None 则从 cfg 读取)
         cfg: 配置对象
         logger: 日志记录器
-    
+
     Returns:
         - 单 ε: {clean_acc, fgsm_acc, pgd_acc, ...}
         - 多 ε: {eps_value: {clean_acc, fgsm_acc, pgd_acc, ...}, ...}
@@ -179,13 +193,15 @@ def evaluate_adversarial(
     if cfg is not None:
         if eps is None:
             # 优先检查多 eps 列表
-            eps = getattr(cfg.constants, 'adv_eps_list', None)
+            eps = getattr(cfg, "adv_eps_list", None)
             if eps is None:
-                eps = getattr(cfg.constants, 'adv_eps', 0.03137)
-        
-        alpha = alpha if alpha is not None else getattr(cfg.constants, 'adv_alpha', 0.00784)
-        steps = steps if steps is not None else getattr(cfg.constants, 'adv_pgd_steps', 10)
-        dataset = dataset if dataset is not None else getattr(cfg.base, 'dataset_name', 'cifar10')
+                eps = getattr(cfg, "adv_eps", 0.03137)
+
+        alpha = alpha if alpha is not None else getattr(cfg, "adv_alpha", 0.00784)
+        steps = steps if steps is not None else getattr(cfg, "adv_pgd_steps", 10)
+        dataset = (
+            dataset if dataset is not None else getattr(cfg, "dataset_name", "cifar10")
+        )
     else:
         # 无配置时的默认兜底
         eps = eps if eps is not None else 0.03137
@@ -201,9 +217,10 @@ def evaluate_adversarial(
         return {
             e: evaluate_adversarial(
                 trainer_or_models, loader, e, alpha, steps, dataset, cfg, logger
-            ) for e in eps
+            )
+            for e in eps
         }
-    
+
     # 3. 单 ε 模式: 核心评估逻辑
     return _evaluate_single_eps(
         trainer_or_models, loader, eps, alpha, steps, dataset, cfg, logger
@@ -215,23 +232,26 @@ def _evaluate_single_eps(
 ) -> Dict:
     """单 ε 对抗评估核心逻辑"""
     from tqdm import tqdm
+
     from .strategies import get_ensemble_fn
 
     log = logger or get_logger()
-    log.info(f"\n🗡️ Adversarial Eval (ε={eps * 255:.1f}/255, Steps={steps})")
+    log.info("🗡️ Adversarial Eval")
 
     models, device = get_models_from_source(trainer_or_models)
     mean, std = _get_dataset_norm(dataset, device)
 
     # 建立集成攻击外壳（使用配置的集成策略）
     ensemble_fn = get_ensemble_fn(cfg) if cfg else None
-    ens_model = _EnsembleProxy(models, ensemble_fn).to(device).eval()
+    # 注意: 不再强制 .to(device)，因为 models 可能分布在不同 GPU 上
+    # _EnsembleProxy 会自动处理跨设备 forward
+    ens_model = _EnsembleProxy(models, ensemble_fn).eval()
     stats = {"total": 0, "clean": 0, "fgsm": 0, "pgd": 0}
-    
-    # 从配置读取针对性攻击开关
-    targeted = getattr(cfg.constants, 'adv_targeted', False) if cfg else False
 
-    pbar = tqdm(loader, desc=f"Adv ε={eps*255:.0f}", leave=False)
+    # 从配置读取针对性攻击开关
+    targeted = getattr(cfg, "adv_targeted", False) if cfg else False
+
+    pbar = tqdm(loader, desc=f"Adv ε={eps * 255:.0f}", leave=False)
     for x, y in pbar:
         x, y = x.to(device), y.to(device)
         stats["total"] += x.size(0)
@@ -248,11 +268,22 @@ def _evaluate_single_eps(
             attack_labels = y
 
         # 3. 对抗攻击 (FGSM/PGD)
+        # 注意: 始终传入原始真实标签 y 用于评估是否被攻击成功
         stats["fgsm"] += _run_and_eval_attack(
-            ens_model, fgsm_attack, x, attack_labels, eps, mean, std, targeted
+            ens_model, _fgsm_attack, x, attack_labels, y, eps, mean, std, targeted
         )
         stats["pgd"] += _run_and_eval_attack(
-            ens_model, pgd_attack, x, attack_labels, eps, alpha, steps, mean, std, targeted
+            ens_model,
+            _pgd_attack,
+            x,
+            attack_labels,
+            y,
+            eps,
+            alpha,
+            steps,
+            mean,
+            std,
+            targeted,
         )
 
         pbar.set_postfix(
@@ -273,7 +304,33 @@ class _EnsembleProxy(nn.Module):
         self._ensemble_fn = ensemble_fn or (lambda x: x.mean(0))
 
     def forward(self, x):
-        stacked = torch.stack([m(x) for m in self.models])
+        outputs = []
+        # 记录输入设备，最终结果需要回到这里
+        input_device = x.device
+
+        for m in self.models:
+            # 1. 确定模型所在设备
+            try:
+                model_device = next(m.parameters()).device
+            except StopIteration:
+                model_device = input_device  # 假定同设备
+
+            # 2. 将输入移到模型设备 (如果不同)
+            if model_device != input_device:
+                x_in = x.to(model_device)
+            else:
+                x_in = x
+
+            # 3. 推理
+            out = m(x_in)
+
+            # 4. 将输出移回输入设备
+            if out.device != input_device:
+                out = out.to(input_device)
+
+            outputs.append(out)
+
+        stacked = torch.stack(outputs)
         return self._ensemble_fn(stacked)
 
 
@@ -290,17 +347,19 @@ def _get_dataset_norm(name, device):
     ).view(1, 3, 1, 1).to(device)
 
 
-def _generate_target_labels(true_labels: torch.Tensor, num_classes: int, device) -> torch.Tensor:
+def _generate_target_labels(
+    true_labels: torch.Tensor, num_classes: int, device
+) -> torch.Tensor:
     """
     生成针对性攻击的目标标签
-    
+
     随机选择一个不同于真实标签的类别作为攻击目标。
-    
+
     Args:
         true_labels: 真实标签 [B]
         num_classes: 类别总数
         device: 设备
-    
+
     Returns:
         目标标签 [B]，保证每个样本的目标类别 ≠ 真实类别
     """
@@ -311,18 +370,28 @@ def _generate_target_labels(true_labels: torch.Tensor, num_classes: int, device)
     return target_labels
 
 
-def _run_and_eval_attack(model, attack_fn, x, y, *args):
-    """封装 攻击 -> 推理 -> 计数 逻辑"""
+def _run_and_eval_attack(model, attack_fn, x, attack_labels, true_y, *args):
+    """封装 攻击 -> 推理 -> 计数 逻辑
+
+    Args:
+        model: 集成模型
+        attack_fn: 攻击函数 (FGSM 或 PGD)
+        x: 输入图像
+        attack_labels: 用于生成对抗样本的标签 (非针对性攻击时=true_y，针对性攻击时=目标标签)
+        true_y: 原始真实标签，用于评估攻击后的正确率
+        *args: 攻击函数的其他参数
+    """
     prev_training = model.training
     model.train()  # 确保允许梯度计算
     for m in model.models:
         m.eval()  # BN 维持 eval
 
-    adv_x = attack_fn(model, x, y, *args)
+    adv_x = attack_fn(model, x, attack_labels, *args)
 
     model.train(prev_training)
     with torch.no_grad():
-        return (model(adv_x).argmax(1) == y).sum().item()
+        # 使用原始真实标签评估 (而不是攻击标签)
+        return (model(adv_x).argmax(1) == true_y).sum().item()
 
 
 def _summarize_adv_results(s, eps, alpha, steps, log):
@@ -337,7 +406,4 @@ def _summarize_adv_results(s, eps, alpha, steps, log):
         "pgd_steps": steps,
         "num_samples": t,
     }
-    log.info(
-        f"   ✅ Clean: {res['clean_acc']:.2f}% | FGSM: {res['fgsm_acc']:.2f}% | PGD-{steps}: {res['pgd_acc']:.2f}%"
-    )
     return res

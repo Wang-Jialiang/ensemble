@@ -3,14 +3,12 @@
 统一数据生成脚本 (SDXL Lightning 版)
 ================================================================================
 
-支持三种数据类型的生成:
+支持数据类型的生成:
 - Corruption: 使用 imagecorruptions 库生成损坏数据
-- Domain Shift: 使用 SDXL Lightning Img2Img 生成风格迁移数据
 - OOD: 使用 SDXL Lightning Text2Img 生成分布外数据
 
 使用示例:
     python -m ensemble.datasets.robustness.generate --type corruption --dataset cifar10
-    python -m ensemble.datasets.robustness.generate --type domain --dataset cifar10
     python -m ensemble.datasets.robustness.generate --type ood --dataset cifar10
 """
 
@@ -358,108 +356,16 @@ class LightningPipelineLoader:
         except Exception:
             pass
 
-        # torch.compile: PyTorch 2.0+ 编译加速
-        try:
-            import torch
-
-            if hasattr(torch, "compile") and torch.cuda.is_available():
-                pipe.unet = torch.compile(
-                    pipe.unet, mode="max-autotune", fullgraph=True
-                )
-                get_logger().info("   ⚡ 已启用 torch.compile 加速")
-        except Exception:
-            pass
-
-
-# =============================================================================
-# Domain Shift 生成器 (SDXL Lightning)
-# =============================================================================
-
-
-class DomainGenerator:
-    """Domain Shift 生成器 - 基于 SDXL Lightning Img2Img"""
-
-    def __init__(
-        self,
-        device: str = "cuda",
-        base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
-        lightning_repo: str = "ByteDance/SDXL-Lightning",
-        lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
-        styles: Optional[dict] = None,
-        num_steps: int = 4,
-        img2img_size: int = 512,
-        guidance_scale: float = 4.5,
-    ):
-        self.device = device
-        self.base_model = base_model
-        self.lightning_repo = lightning_repo
-        self.lightning_ckpt = lightning_ckpt
-        if styles is None:
-            from ...config import Config
-
-            styles = Config().generation.styles
-        self.styles = styles
-        self.num_steps = num_steps
-        self.img2img_size = img2img_size
-        self.guidance_scale = guidance_scale
-        self._pipe = None
-
-    def _get_pipe(self):
-        """获取 Img2Img Pipeline"""
-        if self._pipe is None:
-            self._pipe = LightningPipelineLoader.get_img2img(
-                self.device, self.base_model, self.lightning_repo, self.lightning_ckpt
-            )
-        return self._pipe
-
-    def apply_batch(
-        self, images: np.ndarray, style: str, strength: float, batch_size: int = 24
-    ) -> np.ndarray:
-        """批量风格转换"""
-        if style not in self.styles:
-            raise ValueError(f"Unknown style: {style}")
-
-        pipe = self._get_pipe()
-        prompt = self.styles[style]
-        results = []
-
-        from rich.progress import (
-            BarColumn,
-            Progress,
-            TaskProgressColumn,
-            TextColumn,
-            TimeRemainingColumn,
-        )
-
-        with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeRemainingColumn(),
-            console=console,
-            transient=True,
-        ) as progress:
-            task_id = progress.add_task(
-                f"      [{self.device}] {style}/{strength}", total=len(images)
-            )
-
-            for i in range(0, len(images), batch_size):
-                batch = images[i : i + batch_size]
-                orig_h, orig_w = batch.shape[1], batch.shape[2]
-
-                pils = _prepare_pil_batch(batch, self.img2img_size)
-                outputs = pipe(
-                    prompt=[prompt] * len(pils),
-                    image=pils,
-                    strength=strength,
-                    guidance_scale=self.guidance_scale,
-                    num_inference_steps=self.num_steps,
-                ).images
-
-                results.extend(_convert_to_numpy_batch(outputs, (orig_w, orig_h)))
-                progress.update(task_id, advance=len(batch))
-
-        return np.stack(results)
+        # torch.compile: 已禁用
+        # 原因: SDXL UNet 首次编译需要 10-30 分钟，对于 Lightning 4-step 推理收益很小
+        # 如果需要大量生成，可以考虑启用，但需要等待首次编译完成
+        # try:
+        #     import torch
+        #     if hasattr(torch, "compile") and torch.cuda.is_available():
+        #         pipe.unet = torch.compile(pipe.unet, mode="max-autotune", fullgraph=True)
+        #         get_logger().info("   ⚡ 已启用 torch.compile 加速")
+        # except Exception:
+        #     pass
 
 
 # =============================================================================
@@ -512,7 +418,7 @@ class OODGenerator:
         batch_size: int = 24,
         seed: Optional[int] = None,
     ) -> np.ndarray:
-        """批量生成 OOD 图像"""
+        """批量生成 OOD 图像 (resize 后的小尺寸)"""
         import random
 
         if seed is not None:
@@ -560,6 +466,33 @@ class OODGenerator:
 
         return np.stack(results)
 
+    def generate_hires_samples(
+        self,
+        num_samples: int,
+        seed: Optional[int] = None,
+    ) -> np.ndarray:
+        """生成少量高分辨率原图 (仅用于可视化)"""
+        import random
+
+        if seed is not None:
+            random.seed(seed)
+
+        pipe = self._get_pipe()
+        results = []
+
+        for _ in range(num_samples):
+            prompt = random.choice(self.prompts)
+            output = pipe(
+                prompt=prompt,
+                height=self.sdxl_height,
+                width=self.sdxl_width,
+                guidance_scale=self.guidance_scale,
+                num_inference_steps=self.num_steps,
+            ).images[0]
+            results.append(np.array(output))
+
+        return np.stack(results)
+
 
 # =============================================================================
 # 并行处理助手
@@ -568,57 +501,24 @@ class OODGenerator:
 
 def _process_single_corruption(args):
     """单种 corruption 处理函数 (用于 multiprocessing)"""
-    corruption, images_np, severities, output_dir, seed = args
+    corruption, images_np, severities, output_dir, seed, slice_obj = args
+
+    # 切片处理: 只处理分配给该 corruption 的部分数据
+    if slice_obj is not None:
+        images_to_process = images_np[slice_obj]
+    else:
+        images_to_process = images_np
+
     all_severities = []
     for severity in severities:
         corrupted = CorruptionGenerator.apply_batch(
-            images_np, corruption, severity, seed=seed
+            images_to_process, corruption, severity, seed=seed
         )
         all_severities.append(corrupted.astype(np.uint8))
 
     stacked = np.concatenate(all_severities, axis=0)
     np.save(str(output_dir / f"{corruption}.npy"), stacked)
     return corruption
-
-
-def _worker_domain(
-    device,
-    styles,
-    strengths,
-    images_np,
-    labels_np,
-    output_dir,
-    dataset_name,
-    batch_size,
-    base_model,
-    lightning_repo,
-    lightning_ckpt,
-    full_styles_dict,
-    num_steps,
-):
-    """Domain 工作者线程 (用于 GPU 并行)"""
-    generator = DomainGenerator(
-        device=device,
-        base_model=base_model,
-        lightning_repo=lightning_repo,
-        lightning_ckpt=lightning_ckpt,
-        styles=full_styles_dict,
-        num_steps=num_steps,
-    )
-
-    for style in styles:
-        for strength in strengths:
-            get_logger().info(f"   [{device}] 生成: {style} (strength={strength})...")
-
-            # 直接生成并保存为 .npy，不再创建子目录
-            styled_images = generator.apply_batch(
-                images_np, style, strength, batch_size=batch_size
-            )
-
-            # 文件名格式: {style}_{strength}.npy
-            ensure_dir(output_dir / style)
-            save_path = output_dir / style / f"{strength}.npy"
-            np.save(str(save_path), styled_images.astype(np.uint8))
 
 
 def _worker_ood_gpu(
@@ -643,10 +543,10 @@ def _worker_ood_gpu(
         prompts=prompts,
         num_steps=num_steps,
     )
-    imgs = generator.generate_batch(
+    imgs_resized = generator.generate_batch(
         num_samples=n, target_size=target_size, batch_size=bs, seed=seed + gpu_id
     )
-    q.put(imgs)
+    q.put(imgs_resized)
 
 
 # =============================================================================
@@ -660,7 +560,8 @@ def generate_corruption_dataset(
     seed: int = 42,
     force: bool = False,
 ) -> Path:
-    """预生成 corruption 数据集 (使用 CPU 多进程加速)"""
+    """预生成 corruption 数据集 (使用 CPU 多进程加速) - 默认采用类别均衡均衡切分"""
+    import math
     import multiprocessing
     import os
 
@@ -673,12 +574,40 @@ def generate_corruption_dataset(
     if _check_existing_dataset(output_dir, force):
         return output_dir
 
-    get_logger().info(f"🔧 生成 Corruption: {DatasetClass.NAME}-C...")
+    get_logger().info(
+        f"🔧 生成 Corruption: {DatasetClass.NAME}-C (Balanced Strategy)..."
+    )
 
     images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
     total_samples = len(labels_np)
 
-    tasks = [(c, images_np, SEVERITIES, output_dir, seed) for c in CORRUPTIONS]
+    # === 构建生成任务 (Category-Balanced Slicing) ===
+    tasks = []
+
+    # 按照类别分组分配数据片段
+    from .corruption import CORRUPTION_CATEGORIES
+
+    for category, corruption_list in CORRUPTION_CATEGORIES.items():
+        num_types = len(corruption_list)
+        chunk_size = math.ceil(total_samples / num_types)
+
+        for i, corruption in enumerate(corruption_list):
+            start_idx = i * chunk_size
+            end_idx = min((i + 1) * chunk_size, total_samples)
+
+            # 如果起始索引超出范围 (例如向上取整导致溢出)，修正为最后一段或空
+            if start_idx >= total_samples:
+                # 理论上 ceil 不会发生这种情况，除非 num_types > total_samples，这里做个兜底
+                start_idx = total_samples
+                end_idx = total_samples
+
+            slice_obj = slice(start_idx, end_idx)
+            tasks.append(
+                (corruption, images_np, SEVERITIES, output_dir, seed, slice_obj)
+            )
+
+    # ===============================================
+
     num_cpus = os.cpu_count()
 
     from rich.progress import (
@@ -698,113 +627,14 @@ def generate_corruption_dataset(
     ) as progress:
         task_id = progress.add_task("   Corruption 总进度", total=len(tasks))
 
-        with multiprocessing.Pool(processes=min(len(CORRUPTIONS), num_cpus)) as pool:
+        with multiprocessing.Pool(processes=min(len(tasks), num_cpus)) as pool:
             for _ in pool.imap_unordered(_process_single_corruption, tasks):
                 progress.update(task_id, advance=1)
 
     np.save(str(output_dir / "labels.npy"), labels_np)
 
     get_logger().info(
-        f"✅ {DatasetClass.NAME}-C 生成完成: {len(CORRUPTIONS)} corruptions × {total_samples} samples"
-    )
-    return output_dir
-
-
-def generate_domain_dataset(
-    dataset_name: str,
-    root: str = "./data",
-    samples_per_group: Optional[int] = 1000,
-    seed: int = 42,
-    force: bool = False,
-    batch_size: int = 24,
-    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0",
-    lightning_repo: str = "ByteDance/SDXL-Lightning",
-    lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
-    styles: Optional[dict] = None,
-    strengths: Optional[list] = None,
-    num_steps: int = 4,
-) -> Path:
-    """预生成 domain shift 数据集"""
-    import multiprocessing
-    import time
-
-    if dataset_name not in DATASET_REGISTRY:
-        raise ValueError(f"未知数据集: {dataset_name}")
-
-    DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-Domain"
-
-    if _check_existing_dataset(output_dir, force):
-        return output_dir
-
-    images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
-    images_np, labels_np = _sample_dataset(
-        images_np, labels_np, samples_per_group, seed
-    )
-
-    num_gpus = torch.cuda.device_count()
-    get_logger().info(
-        f"🔧 生成 Domain: {DatasetClass.NAME} (SDXL Lightning 4-step, GPU={num_gpus})"
-    )
-
-    styles_list = list(styles.keys()) if styles else []
-    start_time = time.time()
-
-    if num_gpus == 0:
-        # CPU 串行模式
-        generator = DomainGenerator(
-            device="cpu",
-            base_model=base_model,
-            lightning_repo=lightning_repo,
-            lightning_ckpt=lightning_ckpt,
-            styles=styles,
-            num_steps=num_steps,
-        )
-        for style in styles_list:
-            for str_val in strengths:
-                get_logger().info(f"   [cpu] 生成: {style} (strength={str_val})...")
-                styled = generator.apply_batch(
-                    images_np, style, str_val, batch_size=batch_size
-                )
-                ensure_dir(output_dir / style)
-                save_path = output_dir / style / f"{str_val}.npy"
-                np.save(str(save_path), styled.astype(np.uint8))
-    else:
-        # GPU 并行模式
-        processes = []
-        for i in range(num_gpus):
-            gpu_styles = styles_list[i::num_gpus]
-            if not gpu_styles:
-                continue
-            p = multiprocessing.Process(
-                target=_worker_domain,
-                args=(
-                    f"cuda:{i}",
-                    gpu_styles,
-                    strengths,
-                    images_np,
-                    labels_np,
-                    output_dir,
-                    dataset_name,
-                    batch_size,
-                    base_model,
-                    lightning_repo,
-                    lightning_ckpt,
-                    styles,
-                    num_steps,
-                ),
-            )
-            p.start()
-            processes.append(p)
-        for p in processes:
-            p.join()
-
-    # 保存对应的 labels.npy，方便加载
-    np.save(str(output_dir / "labels.npy"), labels_np)
-
-    elapsed = time.time() - start_time
-    get_logger().info(
-        f"✅ {DatasetClass.NAME}-Domain 生成完成! ⏱️ 耗时: {elapsed:.1f}s ({elapsed / 60:.1f}分钟)"
+        f"✅ {DatasetClass.NAME}-C 生成完成: {len(tasks)} corruptions (Category-Balanced)"
     )
     return output_dir
 
@@ -822,7 +652,9 @@ def generate_ood_dataset(
     prompts: Optional[list] = None,
     num_steps: int = 4,
 ) -> Path:
-    """预生成 OOD 数据集"""
+    """预生成 OOD 数据集 (仅保存 resize 后的小图)"""
+    import time
+
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"未知数据集: {dataset_name}")
 
@@ -836,6 +668,7 @@ def generate_ood_dataset(
         f"🔧 生成 OOD: {DatasetClass.NAME} ({num_samples} 张, SDXL Lightning 4-step)"
     )
 
+    start_time = time.time()
     num_gpus = torch.cuda.device_count()
     if num_gpus <= 1:
         device = "cuda:0" if num_gpus == 1 else "cpu"
@@ -889,7 +722,10 @@ def generate_ood_dataset(
             p.join()
         np.save(str(output_dir / "images.npy"), np.concatenate(all_imgs, axis=0))
 
-    get_logger().info(f"✅ {DatasetClass.NAME}-OOD 生成完成!")
+    elapsed = time.time() - start_time
+    get_logger().info(
+        f"✅ {DatasetClass.NAME}-OOD 生成完成! {num_samples} 张 ⏱️ 耗时: {elapsed:.1f}s ({elapsed / 60:.1f}分钟)"
+    )
     return output_dir
 
 
@@ -932,50 +768,6 @@ def visualize_corruption(
             )
 
 
-def visualize_domain(
-    dataset_name: str,
-    root: str = "./data",
-    num_vis: int = 8,
-    gen_cfg=None,
-    seed: int = 42,
-):
-    """为 Domain Shift 生成可视化对比图"""
-    DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-Domain"
-    vis_dir = output_dir / "visuals"
-    ensure_dir(vis_dir)
-
-    extra_kwargs = {}
-    if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
-        extra_kwargs["seed"] = seed
-    test_dataset = DatasetClass(root=root, train=False, **extra_kwargs)
-    images_np = test_dataset.images.permute(0, 2, 3, 1).numpy()[:num_vis]
-
-    get_logger().info("🎨 正在生成 Domain 可视化对比图...")
-
-    generator = DomainGenerator(
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        base_model=gen_cfg.base_model,
-        lightning_repo=gen_cfg.lightning_repo,
-        lightning_ckpt=gen_cfg.lightning_ckpt,
-        styles=gen_cfg.styles,
-        num_steps=gen_cfg.num_steps,
-    )
-
-    for style in list(gen_cfg.styles.keys()):
-        for strength in gen_cfg.strengths:
-            styled = generator.apply_batch(
-                images_np, style, strength, batch_size=num_vis
-            )
-            save_visual_comparison(
-                images_np,
-                styled,
-                vis_dir / f"{style}_st{strength}.png",
-                f"{style} (strength={strength})",
-                num_samples=num_vis,
-            )
-
-
 # =============================================================================
 # CLI 入口
 # =============================================================================
@@ -996,7 +788,7 @@ def _parse_args():
         description="项目鲁棒性数据生成器 (SDXL Lightning)"
     )
     parser.add_argument(
-        "--type", type=str, required=True, choices=["corruption", "domain", "ood"]
+        "--type", type=str, required=True, choices=["corruption", "ood"]
     )
     parser.add_argument(
         "--dataset", type=str, required=True, choices=list(DATASET_REGISTRY.keys())
@@ -1016,21 +808,6 @@ def _execute_generation(args, config):
     if args.type == "corruption":
         generate_corruption_dataset(
             args.dataset, config.data_root, config.seed, args.force
-        )
-    elif args.type == "domain":
-        generate_domain_dataset(
-            args.dataset,
-            config.data_root,
-            gen_cfg.samples_per_group,
-            config.seed,
-            args.force,
-            gen_cfg.batch_size,
-            gen_cfg.base_model,
-            gen_cfg.lightning_repo,
-            gen_cfg.lightning_ckpt,
-            gen_cfg.styles,
-            gen_cfg.strengths,
-            gen_cfg.num_steps,
         )
     elif args.type == "ood":
         generate_ood_dataset(
@@ -1057,16 +834,13 @@ def _execute_visualization(args, config):
             config.generation,
             config.seed,
         )
-    elif args.type == "domain":
-        visualize_domain(
+    elif args.type == "ood":
+        visualize_ood(
             args.dataset,
             config.data_root,
             config.generation.num_vis,
             config.generation,
-            config.seed,
         )
-    elif args.type == "ood":
-        visualize_ood(args.dataset, config.data_root, config.generation.num_vis)
 
 
 def save_visual_grid(
@@ -1089,13 +863,15 @@ def save_visual_grid(
         imgs = images
 
     h, w = imgs.shape[1:3]
-    ncols = (n + nrow - 1) // nrow
+    # 动态调整列数：实际列数不超过样本数
+    actual_cols = min(nrow, n)
+    actual_rows = (n + actual_cols - 1) // actual_cols
 
-    grid = Image.new("RGB", (w * nrow, h * ncols))
+    grid = Image.new("RGB", (w * actual_cols, h * actual_rows))
 
     for i, img in enumerate(imgs):
-        r = i // nrow
-        c = i % nrow
+        r = i // actual_cols
+        c = i % actual_cols
         grid.paste(Image.fromarray(img.astype(np.uint8)), (c * w, r * h))
 
     ensure_dir(output_path.parent)
@@ -1103,35 +879,65 @@ def save_visual_grid(
     get_logger().info(f"📊 可视化保存: {output_path}")
 
 
-def visualize_ood(dataset_name: str, root: str = "./data", num_vis: int = 8):
-    """为 OOD 生成可视化网格"""
+def visualize_ood(
+    dataset_name: str,
+    root: str = "./data",
+    num_vis: int = 8,
+    gen_cfg=None,
+):
+    """为 OOD 生成可视化网格
+
+    1. 展示 resize 后的小图 (从 images.npy)
+    2. 实时生成 num_vis 个高分辨率原图并展示
+    """
     DatasetClass = DATASET_REGISTRY[dataset_name]
     output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
     images_path = output_dir / "images.npy"
+
     if not images_path.exists():
         get_logger().warning(f"⚠️ OOD 数据未找到: {images_path}")
         return
 
     get_logger().info("🎨 正在生成 OOD 可视化...")
 
-    # Load images (using mmap to avoid loading everything if large)
+    # 1. 加载并展示 resize 后的小图
     images = np.load(str(images_path), mmap_mode="r")
-
-    # Take a subset for visualization
     total_images = len(images)
     indices = np.linspace(0, total_images - 1, min(total_images, num_vis), dtype=int)
     vis_images = images[indices]
 
     save_visual_grid(
         vis_images,
-        vis_dir / "ood_samples.png",
-        "OOD Samples",
+        vis_dir / "ood_samples_resized.png",
+        "OOD Samples (Resized)",
         num_samples=num_vis,
         nrow=4,
     )
+
+    # 2. 实时生成 num_vis 个高分辨率原图
+    if gen_cfg is not None:
+        get_logger().info(f"   📷 生成 {num_vis} 张高分辨率原图用于可视化...")
+        generator = OODGenerator(
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            base_model=gen_cfg.base_model,
+            lightning_repo=gen_cfg.lightning_repo,
+            lightning_ckpt=gen_cfg.lightning_ckpt,
+            prompts=gen_cfg.ood_prompts,
+            num_steps=gen_cfg.num_steps,
+        )
+        hires_samples = generator.generate_hires_samples(num_vis, seed=42)
+
+        save_visual_grid(
+            hires_samples,
+            vis_dir / "ood_samples_hires.png",
+            "OOD Samples (High-Resolution 1024x1024)",
+            num_samples=num_vis,
+            nrow=4,
+        )
+        get_logger().info(f"   ✅ 高分辨率原图: {vis_dir / 'ood_samples_hires.png'}")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 模块化训练包，包含：
 - core: StagedEnsembleTrainer (三阶段集成训练器)、train_experiment
 - worker: GPUWorker、HistorySaver
-- augmentation: 数据增强方法、CloudMaskGenerator
+- augmentation: 数据增强方法
 - scheduler: 优化器工厂、调度器工厂、EarlyStopping
 
 使用方式:
@@ -18,7 +18,6 @@
 from .augmentation import (
     AUGMENTATION_REGISTRY,
     AugmentationMethod,
-    CloudMaskGenerator,
     CutoutAugmentation,
     GridMaskAugmentation,
     NoAugmentation,
@@ -56,7 +55,6 @@ __all__ = [
     # Augmentation
     "AUGMENTATION_REGISTRY",
     "AugmentationMethod",
-    "CloudMaskGenerator",
     "CutoutAugmentation",
     "GridMaskAugmentation",
     "PixelHaSAugmentation",

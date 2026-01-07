@@ -60,10 +60,27 @@ class CheckpointLoader:
 
         return model_files  # 空列表
 
+    @staticmethod
+    def _fix_state_dict_keys(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """修复 state_dict 键，移除 torch.compile 产生的 _orig_mod. 前缀"""
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("_orig_mod."):
+                k = k[10:]  # len("_orig_mod.") == 10
+            new_state_dict[k] = v
+        return new_state_dict
+
     @classmethod
-    def _load_model_from_file(cls, model_file: Path, cfg: "Config") -> nn.Module:
+    def _load_model_from_file(
+        cls, model_file: Path, cfg: "Config", device: str = None
+    ) -> nn.Module:
         """
         从文件加载单个模型，自动检测文件格式
+
+        Args:
+            model_file: 模型文件路径
+            cfg: 配置对象
+            device: 目标设备 (如 "cuda:0", "cuda:1")
         """
         state = torch.load(model_file, weights_only=False)
 
@@ -71,11 +88,20 @@ class CheckpointLoader:
 
         # 支持两种格式: dict 包装 或直接 state_dict
         if isinstance(state, dict) and "model_state_dict" in state:
-            model.load_state_dict(state["model_state_dict"])
+            state_dict = state["model_state_dict"]
         else:
-            model.load_state_dict(state)
+            state_dict = state
+
+        # 修复并加载
+        state_dict = cls._fix_state_dict_keys(state_dict)
+        model.load_state_dict(state_dict)
 
         model.eval()
+        # 移到指定设备
+        if device:
+            model = model.to(device)
+        elif torch.cuda.is_available():
+            model = model.cuda()
         return model
 
     @staticmethod
@@ -109,10 +135,11 @@ class CheckpointLoader:
 
         if state_path.exists():
             state = torch.load(state_path, weights_only=False)
-            training_time = state.get("total_training_time", 0.0)
+            training_time = state.get("total_time", 0.0)  # 与 core.py 保存时的键名一致
+            params = state.get("params", (False, 0.0, 0.0))
             train_config = {
-                "augmentation_method": state.get("augmentation_method", "unknown"),
-                "use_curriculum": state.get("use_curriculum", False),
+                "augmentation_method": state.get("aug_method", "unknown"),
+                "use_curriculum": params[0] if params else False,
             }
 
         # 查找模型文件
@@ -123,13 +150,25 @@ class CheckpointLoader:
         if not model_files:
             raise RuntimeError(f"未找到模型文件: {checkpoint_dir}")
 
-        # 加载模型
+        # 获取可用 GPU 列表
+        gpu_ids = getattr(cfg, "gpu_ids", [0]) if cfg else [0]
+        if not gpu_ids:
+            gpu_ids = [0]
+        n_gpus = len(gpu_ids)
+
+        # 加载模型并分配到不同 GPU
         models = []
-        for model_file in model_files:
-            model = CheckpointLoader._load_model_from_file(model_file, cfg)
+        for i, model_file in enumerate(model_files):
+            # 循环分配到各 GPU
+            gpu_idx = gpu_ids[i % n_gpus]
+            model = CheckpointLoader._load_model_from_file(
+                model_file, cfg, device=f"cuda:{gpu_idx}"
+            )
             models.append(model)
 
-        get_logger().info(f"✅ 加载 {experiment_name}: {len(models)} 个模型")
+        get_logger().info(
+            f"✅ 加载 {experiment_name}: {len(models)} 个模型 (分布在 {n_gpus} GPU)"
+        )
 
         return {
             "name": experiment_name,

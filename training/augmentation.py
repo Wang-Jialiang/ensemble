@@ -3,7 +3,7 @@
 数据增强模块
 ================================================================================
 
-云状Mask生成器、各种数据增强方法、增强方法注册表
+_CloudMaskGenerator (内部)、各种数据增强方法、增强方法注册表
 """
 
 import random
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-class CloudMaskGenerator:
+class _CloudMaskGenerator:
     """GPU加速的云状Mask生成器"""
 
     def __init__(
@@ -280,7 +280,9 @@ class PixelHaSAugmentation(AugmentationMethod):
             gen = torch.Generator(device=self.device).manual_seed(
                 self._model_seeds[model_idx]
             )
-            single_mask = torch.rand((1, C, H, W), device=self.device, generator=gen) > ratio
+            single_mask = (
+                torch.rand((1, C, H, W), device=self.device, generator=gen) > ratio
+            )
             return single_mask.expand(B, -1, -1, -1)
 
         # 样本级：每个样本独立随机
@@ -402,7 +404,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
     ):
         super().__init__(device)
         self.height, self.width = height, width
-        self.mask_generator = CloudMaskGenerator(
+        self.mask_generator = _CloudMaskGenerator(
             height,
             width,
             device,

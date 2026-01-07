@@ -11,70 +11,117 @@ from torch.utils.data import DataLoader, Subset
 
 from ..utils import get_logger
 from .preloaded import DATASET_REGISTRY
-from .robustness import CorruptionDataset, DomainShiftDataset, OODDataset
+from .robustness import CorruptionDataset, OODDataset
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据集加载函数                                                               ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 
-def load_dataset(cfg):
-    """加载并预处理数据集 (主流程大纲)"""
+def load_dataset(cfg, mode: str = "all"):
+    """
+    按需加载数据集
+
+    Args:
+        cfg: 配置对象
+        mode: 加载模式
+            - "train": 仅返回 (train_loader, val_loader)
+            - "eval": 仅返回 (test_loader, corruption_dataset, ood_dataset)
+            - "all": 返回全部 (train_loader, val_loader, test_loader, c_ds, o_ds)
+    """
     dataset_name = cfg.dataset_name.lower()
     DatasetClass = _get_dataset_class(dataset_name)
 
-    # 1. 准备标准训练/验证/测试 Loader
-    loaders = _prepare_standard_loaders(cfg, DatasetClass)
-    
-    # 2. 准备鲁棒性评估数据集 (基于 Cache)
-    robustness_suite = _init_robustness_group(cfg, dataset_name)
+    if mode == "train":
+        train_loader, val_loader = _prepare_train_loaders(cfg, DatasetClass)
+        get_logger().info(f"📊 训练数据集加载完成: {dataset_name.upper()}")
+        return train_loader, val_loader
 
-    get_logger().info(f"📊 数据集初始化完成: {dataset_name.upper()}")
-    return (*loaders, *robustness_suite)
+    elif mode == "eval":
+        test_loader = _prepare_test_loader(cfg, DatasetClass)
+        robustness_suite = _init_robustness_group(cfg, dataset_name)
+        get_logger().info(f"📊 评估数据集加载完成: {dataset_name.upper()}")
+        return test_loader, *robustness_suite
+
+    else:  # "all" - 兼容旧调用
+        loaders = _prepare_standard_loaders(cfg, DatasetClass)
+        robustness_suite = _init_robustness_group(cfg, dataset_name)
+        get_logger().info(f"📊 数据集初始化完成: {dataset_name.upper()}")
+        return (*loaders, *robustness_suite)
 
 
 def _get_dataset_class(name):
     """从注册表获取类，处理错误"""
     if name not in DATASET_REGISTRY:
-        raise ValueError(f"不支持的数据集: {name}. 可用: {list(DATASET_REGISTRY.keys())}")
+        raise ValueError(
+            f"不支持的数据集: {name}. 可用: {list(DATASET_REGISTRY.keys())}"
+        )
     return DATASET_REGISTRY[name]
 
 
 def _prepare_standard_loaders(cfg, DatasetClass):
-    """执行数据集划分并创建标准 DataLoaders"""
-    # 1. 实例化数据集 (处理 EuroSAT 等非官方划分情况)
+    """执行数据集划分并创建标准 DataLoaders (兼容旧调用)"""
+    train_loader, val_loader, train_full = _prepare_train_loaders(
+        cfg, DatasetClass, return_full=True
+    )
+    test_loader = _prepare_test_loader(cfg, DatasetClass)
+    return train_loader, val_loader, test_loader
+
+
+def _prepare_train_loaders(cfg, DatasetClass, return_full=False):
+    """仅加载训练集和验证集"""
     extra = {}
     if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
         extra = {"test_split": cfg.test_split, "seed": cfg.seed}
     train_full = DatasetClass(root=cfg.data_root, train=True, **extra)
-    test_ds = DatasetClass(root=cfg.data_root, train=False, **extra)
 
-    # 2. 训练/验证集划分
+    # 训练/验证集划分
     v_size = int(len(train_full) * cfg.val_split)
     t_size = len(train_full) - v_size
-    idx = torch.randperm(len(train_full), generator=torch.Generator().manual_seed(cfg.seed))
-    
+    idx = torch.randperm(
+        len(train_full), generator=torch.Generator().manual_seed(cfg.seed)
+    )
+
     train_sub = Subset(train_full, idx[:t_size].tolist())
     val_sub = Subset(train_full, idx[t_size:].tolist())
 
-    # 3. 构造 Loader
-    kwargs = {
+    kwargs = _get_loader_kwargs(cfg)
+    train_loader = DataLoader(
+        train_sub, batch_size=cfg.batch_size, shuffle=True, **kwargs
+    )
+    val_loader = DataLoader(
+        val_sub, batch_size=cfg.batch_size * 2, shuffle=False, **kwargs
+    )
+
+    if return_full:
+        return train_loader, val_loader, train_full
+    return train_loader, val_loader
+
+
+def _prepare_test_loader(cfg, DatasetClass):
+    """仅加载测试集"""
+    extra = {}
+    if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
+        extra = {"test_split": cfg.test_split, "seed": cfg.seed}
+    test_ds = DatasetClass(root=cfg.data_root, train=False, **extra)
+
+    kwargs = _get_loader_kwargs(cfg)
+    return DataLoader(test_ds, batch_size=cfg.batch_size * 2, shuffle=False, **kwargs)
+
+
+def _get_loader_kwargs(cfg):
+    """获取 DataLoader 公共参数"""
+    return {
         "num_workers": cfg.num_workers,
         "pin_memory": cfg.pin_memory,
         "persistent_workers": cfg.persistent_workers and cfg.num_workers > 0,
     }
-    
-    return (
-        DataLoader(train_sub, batch_size=cfg.batch_size, shuffle=True, **kwargs),
-        DataLoader(val_sub, batch_size=cfg.batch_size * 2, shuffle=False, **kwargs),
-        DataLoader(test_ds, batch_size=cfg.batch_size * 2, shuffle=False, **kwargs)
-    )
 
 
 def _init_robustness_group(cfg, name):
     """按需探索并加载鲁棒性数据集"""
     results = []
-    
+
     # Corruption
     c_ds = None
     if cfg.corruption_dataset:
@@ -92,14 +139,5 @@ def _init_robustness_group(cfg, name):
         except Exception as e:
             get_logger().warning(f"   ⚠️ OOD 数据集不可用: {e}")
     results.append(o_ds)
-
-    # Domain
-    d_ds = None
-    if cfg.domain_dataset:
-        try:
-            d_ds = DomainShiftDataset(id_dataset=name, root=cfg.data_root)
-        except Exception as e:
-            get_logger().warning(f"   ⚠️ Domain Shift 数据集不可用: {e}")
-    results.append(d_ds)
 
     return tuple(results)

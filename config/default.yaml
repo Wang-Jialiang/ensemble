@@ -77,7 +77,7 @@ base:
   scheduler: "cosine"               # 调度器: "cosine", "none"
   weight_decay: 0.05                # 权重衰减: AdamW推荐 0.05, SGD推荐 0.0001
   model_level_augmentation: true    # 模型级固定 seed (每个模型固定视角)
-  early_stopping_patience: 20       # 早停耐心值 (验证集无改善的轮数)
+  early_stopping_patience: 30       # 早停耐心值 (验证集无改善的轮数)
 
   # [增强细节调整]
   perlin_scale_ratio: 0.25          # Perlin 噪声尺度比例 (0.2 约产生 2-3 个主要遮挡块)
@@ -89,7 +89,7 @@ base:
   # ==========================================================================
   warmup_epochs: 20                 # Warmup 阶段轮数
   progressive_epochs: 40            # Progressive 阶段轮数
-  finetune_epochs: 20               # Finetune 阶段轮数
+  finetune_epochs: 40               # Finetune 阶段轮数
   mask_pool_size: 1024              # 预生成的 Mask 池大小
   mask_start_ratio: 0.15            # Progressive 阶段起始遮罩比例
   mask_end_ratio: 0.35              # Progressive 阶段结束遮罩比例
@@ -109,10 +109,10 @@ base:
   # ==========================================================================
   save_every_n_epochs: 20           # 每 N 轮保存一次检查点
   keep_last_n_checkpoints: 3        # 保留最近 N 个检查点
-  use_tensorboard: true             # 是否启用 TensorBoard 日志
   use_wandb: true                  # 是否启用 Weights & Biases 日志
   wandb_project: "ensemble"         # wandb 项目名称
   log_level: "INFO"                 # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
+  log_to_console: false              # 训练日志是否输出到控制台 (设为 false 则仅写入文件)
 
   # ==========================================================================
   # [评估专用] 评估配置 - 仅评估模块使用
@@ -120,7 +120,6 @@ base:
   ensemble_strategy: "mean"         # 集成策略: "mean" (等权平均), "voting" (多数投票)
   corruption_dataset: true          # 是否加载 Corruption 数据集进行评估
   ood_dataset: true                 # 是否加载 OOD 数据集进行评估
-  domain_dataset: true              # 是否加载 Domain Shift 数据集进行评估
   eval_run_gradcam: true            # 是否在评估时运行 Grad-CAM 分析
   eval_run_landscape: true          # 是否在评估时运行 Loss Landscape 分析
 
@@ -141,19 +140,74 @@ base:
   use_curriculum: true              # 是否使用课程学习
   fixed_ratio: 0.25                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
   fixed_prob: 0.5                   # 固定遮挡概率 (仅 use_curriculum=false 时生效)
-  share_warmup_backbone: true       # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
+  share_warmup_backbone: false       # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
 
 # ==============================================================================
 # 实验列表
 # ==============================================================================
 experiments:
-  - name: "ExpD_Perlin_Curriculum"
-    desc: "Perlin + Dual Curriculum (PROPOSED)"
+  # ============================================================================
+  # Perlin 噪声遮挡
+  # ============================================================================
+  - name: "Exp01_Perlin_Curriculum"
+    desc: "Perlin + Curriculum Learning"
     augmentation_method: "perlin"
     use_curriculum: true
 
-  - name: "ExpA_Baseline"
-    desc: "Baseline (No Augmentation)"
+  - name: "Exp02_Perlin_Fixed"
+    desc: "Perlin + Fixed Ratio"
+    augmentation_method: "perlin"
+    use_curriculum: false
+
+  # ============================================================================
+  # Cutout 硬遮挡
+  # ============================================================================
+  - name: "Exp03_Cutout_Curriculum"
+    desc: "Cutout + Curriculum Learning"
+    augmentation_method: "cutout"
+    use_curriculum: true
+
+  - name: "Exp04_Cutout_Fixed"
+    desc: "Cutout + Fixed Ratio"
+    augmentation_method: "cutout"
+    use_curriculum: false
+
+  # ============================================================================
+  # GridMask 网格遮挡
+  # ============================================================================
+  - name: "Exp05_GridMask_Curriculum"
+    desc: "GridMask + Curriculum Learning"
+    augmentation_method: "gridmask"
+    use_curriculum: true
+
+  - name: "Exp06_GridMask_Fixed"
+    desc: "GridMask + Fixed Ratio"
+    augmentation_method: "gridmask"
+    use_curriculum: false
+
+  # ============================================================================
+  # 像素级 Hide-and-Seek
+  # ============================================================================
+  - name: "Exp07_PixelHaS_Curriculum"
+    desc: "Pixel HaS + Curriculum Learning"
+    augmentation_method: "pixel_has"
+    use_curriculum: true
+
+  - name: "Exp08_PixelHaS_Fixed"
+    desc: "Pixel HaS + Fixed Ratio"
+    augmentation_method: "pixel_has"
+    use_curriculum: false
+
+  # ============================================================================
+  # Baseline (无增强)
+  # ============================================================================
+  - name: "Exp09_Baseline_Curriculum"
+    desc: "No Augmentation + Curriculum Schedule (Control)"
+    augmentation_method: "none"
+    use_curriculum: true
+
+  - name: "Exp10_Baseline_Fixed"
+    desc: "No Augmentation + Fixed Schedule (Pure Baseline)"
     augmentation_method: "none"
     use_curriculum: false
 
@@ -161,12 +215,37 @@ experiments:
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
 # ==============================================================================
+# 新目录结构: ./output/training/{exp_name}/checkpoints/{exp_name}/best_acc
 eval_checkpoints:
-  - name: "ExpA_Baseline"
-    path: "./outputs/exp_latest/checkpoints/ExpA_Baseline/best"
+  - name: "Exp01_Perlin_Curriculum"
+    path: "./output/Exp01_Perlin_Curriculum_20260106_220605/checkpoints/Exp01_Perlin_Curriculum/best_acc"
 
-  - name: "ExpB_Cutout_Fixed"
-    path: "./outputs/exp_latest/checkpoints/ExpB_Cutout_Fixed/best"
+  - name: "Exp02_Perlin_Fixed"
+    path: "./output/Exp02_Perlin_Fixed_20260106_224836/checkpoints/Exp02_Perlin_Fixed/best_acc"
+
+  - name: "Exp03_Cutout_Curriculum"
+    path: "./output/Exp03_Cutout_Curriculum_20260106_233422/checkpoints/Exp03_Cutout_Curriculum/best_acc"
+
+  - name: "Exp04_Cutout_Fixed"
+    path: "./output/Exp04_Cutout_Fixed_20260107_001524/checkpoints/Exp04_Cutout_Fixed/best_acc"
+
+  - name: "Exp05_GridMask_Curriculum"
+    path: "./output/Exp05_GridMask_Curriculum_20260107_005336/checkpoints/Exp05_GridMask_Curriculum/best_acc"
+
+  - name: "Exp06_GridMask_Fixed"
+    path: "./output/Exp06_GridMask_Fixed_20260107_014014/checkpoints/Exp06_GridMask_Fixed/best_acc"
+
+  - name: "Exp07_PixelHaS_Curriculum"
+    path: "./output/Exp07_PixelHaS_Curriculum_20260107_023054/checkpoints/Exp07_PixelHaS_Curriculum/best_acc"
+
+  - name: "Exp08_PixelHaS_Fixed"
+    path: "./output/Exp08_PixelHaS_Fixed_20260107_030244/checkpoints/Exp08_PixelHaS_Fixed/best_acc"
+
+  - name: "Exp09_Baseline_Curriculum"
+    path: "./output/Exp09_Baseline_Curriculum_20260107_035243/checkpoints/Exp09_Baseline_Curriculum/best_acc"
+
+  - name: "Exp10_Baseline_Fixed"
+    path: "./output/Exp10_Baseline_Fixed_20260107_043045/checkpoints/Exp10_Baseline_Fixed/best_acc"
 
 # ==============================================================================
 # 数据生成配置 (generate.py 使用)
@@ -177,39 +256,50 @@ generation:
   lightning_ckpt: "sdxl_lightning_4step_unet.safetensors"  # 4-step UNet 检查点
   num_steps: 4                                             # 推理步数 (2/4/8)
   batch_size: 12                                           # 启用VAE优化后可提高
-  samples_per_group: 100                                  # 每组样本数 (500足够评估)
+  samples_per_group: 1000                                  # 每组样本数 (500足够评估)
   visualize: true                                          # 是否生成可视化对比图
   num_vis: 1                                              # 每个类别/风格可视化的样本数
 
   # SDXL 生成参数
   sdxl_height: 1024                                        # Text2Img 原始输出高度
   sdxl_width: 1024                                         # Text2Img 原始输出宽度
-  img2img_size: 512                                        # Img2Img 中间处理尺寸
-  guidance_scale_img2img: 4.5                              # Img2Img CFG 引导强度
   guidance_scale_text2img: 0.0                             # Text2Img CFG (Lightning 推荐 0)
 
   # 可视化选项
-  vis_corruptions: ["gaussian_noise", "fog", "glass_blur"]  # 可视化的 corruption 类型
+  vis_corruptions: ["fog"]  # 可视化的 corruption 类型
 
-  # Domain Shift 风格与提示词
-  styles:
-    sketch: "pencil sketch drawing"
-    painting: "oil painting artwork"
-    cartoon: "cartoon illustration style"
-    watercolor: "watercolor painting art"
-
-  # Domain Shift 强度
-  strengths: [0.5, 0.7]
-
-  # OOD Prompts (Text2Img)
+  # OOD Prompts (CIFAR-10 Near-OOD: 与 10 类相似但不属于它们)
+  # CIFAR-10: 飞机/汽车/鸟/猫/鹿/狗/青蛙/马/船/卡车
   ood_prompts:
-    - "abstract colorful geometric patterns"
-    - "underwater coral reef with tropical fish"
-    - "close-up of delicious food dishes"
-    - "city street at night with neon lights"
-    - "cartoon character illustration"
-    - "ancient stone ruins in jungle"
-    - "microscopic view of cells"
-    - "aurora borealis in night sky"
-    - "vintage book pages with text"
-    - "crystal formations in cave"
+    # 飞机近似: 直升机、无人机、热气球
+    - "helicopter flying in clear blue sky"
+    - "drone quadcopter hovering in air"
+    - "hot air balloon floating above fields"
+    # 汽车近似: 摩托车、公交车、火车
+    - "motorcycle parked on street"
+    - "city bus at bus stop"
+    - "steam locomotive train"
+    # 鸟近似: 蝴蝶、蜻蜓、蝙蝠
+    - "colorful butterfly on flower"
+    - "dragonfly with transparent wings"
+    - "bat flying at dusk"
+    # 猫/狗近似: 狐狸、狼、豹
+    - "red fox in forest"
+    - "grey wolf in snow"
+    - "leopard resting on tree branch"
+    # 鹿/马近似: 斑马、骆驼、羊驼
+    - "zebra in african savanna"
+    - "camel in desert"
+    - "llama in mountain pasture"
+    # 青蛙近似: 蟾蜍、蜥蜴、蝾螈
+    - "toad sitting on wet rock"
+    - "green lizard on tree bark"
+    - "salamander near pond"
+    # 船近似: 潜艇、游艇、独木舟
+    - "submarine surfacing in ocean"
+    - "luxury yacht at marina"
+    - "kayak on calm lake"
+    # 卡车近似: 挖掘机、拖拉机、坦克
+    - "excavator on construction site"
+    - "red tractor in farm field"
+    - "military tank"

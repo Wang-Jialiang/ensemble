@@ -12,12 +12,15 @@
     from ensemble.models import apply_init, INIT_REGISTRY
 """
 
-# ResNet 架构
-# 工厂与初始化
+# 初始化策略 (从 init.py 直接导入)
+# 模型工厂 (从 factory.py 导入)
 from .factory import (
-    INIT_REGISTRY,
     MODEL_REGISTRY,
     ModelFactory,
+    register_model,
+)
+from .init import (
+    INIT_REGISTRY,
     apply_init,
     get_supported_inits,
     init_default,
@@ -25,8 +28,9 @@ from .factory import (
     init_orthogonal,
     init_xavier,
     register_init,
-    register_model,
 )
+
+# ResNet 架构
 from .resnet import (
     BasicBlock,
     Bottleneck,
