@@ -41,7 +41,9 @@ class OODDataset:
     def __init__(self, id_dataset: str, root: str = "./data"):
         """OOD 数据集构造函数"""
         if id_dataset not in DATASET_REGISTRY:
-            raise ValueError(f"未知 ID 数据集: {id_dataset}. 可用: {list(DATASET_REGISTRY.keys())}")
+            raise ValueError(
+                f"未知 ID 数据集: {id_dataset}. 可用: {list(DATASET_REGISTRY.keys())}"
+            )
 
         id_class = DATASET_REGISTRY[id_dataset]
         self._init_from_generated(id_class, root)
@@ -52,14 +54,14 @@ class OODDataset:
         imgs_path = data_dir / "images.npy"
 
         if not imgs_path.exists():
-            raise FileNotFoundError(f"未找到生成的 OOD 数据: {imgs_path}")
+            raise FileNotFoundError(f"未找到预生成数据: {imgs_path}")
 
         get_logger().info(f"📥 加载生成的 OOD 数据: {imgs_path}...")
 
         # 1. 加载图像并转换维度
         self.name = f"{id_class.NAME}-OOD-Generated"
         self.images = self._load_numpy_images(imgs_path)
-        
+
         # 2. 初始化统计信息
         self._setup_statistics(id_class)
         get_logger().info(f"✅ 加载了 {len(self.images)} 个 OOD 样本")

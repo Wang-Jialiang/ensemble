@@ -168,7 +168,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         # 4. 初始化状态跟踪变量
         self._init_tracking_structures()
-        self._log_training_config()  # 使用 Rich 展示配置汇总
         cfg.save()  # 持久化当前运行配置
 
     def _init_hardware_optimizations(self):
@@ -185,13 +184,19 @@ class StagedEnsembleTrainer(CheckpointMixin):
         self.wandb_run = None
         if getattr(self.cfg, "use_wandb", False):
             try:
+                from datetime import datetime
+
                 import wandb
 
+                project_name = f"{getattr(self.cfg, 'wandb_project', 'ensemble')}_{datetime.now().strftime('%Y%m%d')}"
                 self.wandb_run = wandb.init(
-                    project=getattr(self.cfg, "wandb_project", "ensemble"),
+                    project=project_name,
                     name=self.name,
                     config=self._get_wandb_config(),
+                    mode="online",
                     reinit="finish_previous",
+                    save_code=False,
+                    settings=wandb.Settings(silent=True),
                 )
             except ImportError:
                 self.logger.warning("⚠️ wandb not installed, skipping")
@@ -241,17 +246,15 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
     def setup_logging(self):
         """设置日志系统"""
-        log_dir = Path(self.cfg.save_dir) / "logs"
-        ensure_dir(log_dir)
-
         logger = logging.getLogger(self.name)
         logger.handlers.clear()
         logger.setLevel(getattr(logging, self.cfg.log_level))
 
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-        # 文件输出 (总是开启)
-        file_handler = logging.FileHandler(log_dir / f"{self.name}_train.log", mode="w")
+        # 文件输出 (直接放在实验目录下)
+        log_path = Path(self.cfg.save_dir) / "train.log"
+        file_handler = logging.FileHandler(log_path, mode="w")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
@@ -430,6 +433,11 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 import wandb
 
                 wandb.finish()
+                # 清理 wandb 本地缓存目录
+                wandb_dir = Path.cwd() / "wandb"
+                if wandb_dir.exists():
+                    shutil.rmtree(wandb_dir, ignore_errors=True)
+                    self.logger.info("🧹 Cleaned up wandb local cache")
 
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
@@ -551,46 +559,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
             "🔄 Shared warmup backbone to all models, re-initialized classifier heads"
         )
 
-    def _log_training_config(self):
-        """展示精美的训练配置表格"""
-        if console is None:
-            return
-
-        from rich.panel import Panel
-        from rich.table import Table
-
-        table = Table(box=None, padding=(0, 2))
-        table.add_column("Property", style="bold cyan")
-        table.add_column("Value", style="magenta")
-
-        # 基础信息
-        table.add_row("Experiment", self.name)
-        table.add_row("Model", self.cfg.model_name)
-        table.add_row("Dataset", self.cfg.dataset_name)
-        table.add_row("Ensemble Size", str(len(self.get_models())))
-        table.add_row("Augmentation", self.augmentation_method)
-        table.add_section()
-
-        # 核心参数
-        table.add_row("Batch Size", str(self.cfg.batch_size))
-        table.add_row("Learning Rate", f"{self.cfg.lr:.6f}")
-        table.add_row("Optimizer", self.cfg.optimizer)
-        table.add_row("Scheduler", self.cfg.scheduler)
-        table.add_section()
-
-        # 硬件信息
-        table.add_row("GPU IDs", str(self.cfg.gpu_ids))
-        table.add_row("Mixed Precision", "ON" if self.cfg.use_amp else "OFF")
-
-        console.print(
-            Panel(
-                table,
-                title="[bold green]Training Configuration Summary[/bold green]",
-                expand=False,
-                border_style="green",
-            )
-        )
-
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 实验运行函数                                                                 ║
@@ -637,7 +605,7 @@ def train_experiment(
     trainer.load_checkpoint("best")
     trainer.total_training_time = training_time
 
-    get_logger().info(f"\n✅ Training completed: {cfg.experiment_name}")
+    get_logger().info(f"✅ Training completed: {cfg.experiment_name}")
     get_logger().info(f"   Checkpoint saved to: {Path(cfg.save_dir) / 'checkpoints'}")
 
     return trainer, training_time

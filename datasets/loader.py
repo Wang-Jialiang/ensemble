@@ -43,12 +43,6 @@ def load_dataset(cfg, mode: str = "all"):
         get_logger().info(f"📊 评估数据集加载完成: {dataset_name.upper()}")
         return test_loader, *robustness_suite
 
-    else:  # "all" - 兼容旧调用
-        loaders = _prepare_standard_loaders(cfg, DatasetClass)
-        robustness_suite = _init_robustness_group(cfg, dataset_name)
-        get_logger().info(f"📊 数据集初始化完成: {dataset_name.upper()}")
-        return (*loaders, *robustness_suite)
-
 
 def _get_dataset_class(name):
     """从注册表获取类，处理错误"""
@@ -59,17 +53,8 @@ def _get_dataset_class(name):
     return DATASET_REGISTRY[name]
 
 
-def _prepare_standard_loaders(cfg, DatasetClass):
-    """执行数据集划分并创建标准 DataLoaders (兼容旧调用)"""
-    train_loader, val_loader, train_full = _prepare_train_loaders(
-        cfg, DatasetClass, return_full=True
-    )
-    test_loader = _prepare_test_loader(cfg, DatasetClass)
-    return train_loader, val_loader, test_loader
-
-
-def _prepare_train_loaders(cfg, DatasetClass, return_full=False):
-    """仅加载训练集和验证集"""
+def _prepare_train_loaders(cfg, DatasetClass):
+    """加载训练集和验证集"""
     extra = {}
     if not getattr(DatasetClass, "HAS_OFFICIAL_SPLIT", True):
         extra = {"test_split": cfg.test_split, "seed": cfg.seed}
@@ -92,9 +77,6 @@ def _prepare_train_loaders(cfg, DatasetClass, return_full=False):
     val_loader = DataLoader(
         val_sub, batch_size=cfg.batch_size * 2, shuffle=False, **kwargs
     )
-
-    if return_full:
-        return train_loader, val_loader, train_full
     return train_loader, val_loader
 
 

@@ -11,7 +11,6 @@ from torch.utils.data import Dataset
 
 from ..utils import get_logger
 
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 数据集基类                                                                   ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -65,13 +64,9 @@ class BasePreloadedDataset(Dataset):
         """返回数据集名称"""
         return self.NAME
 
-    def _log_loaded(self, elapsed: float):
+    def _log_loaded(self):
         """打印加载完成日志"""
-        mem_mb = self.images.numel() * self.images.element_size() / 1024 / 1024
-        dataset_name = self._get_dataset_name()
-        get_logger().info(
-            f"✅ Loaded {len(self)} {dataset_name} samples ({mem_mb:.1f} MB) in {elapsed:.2f}s"
-        )
+        get_logger().info(f"✅ Loaded {len(self)} {self._get_dataset_name()} samples")
 
     def __len__(self):
         return len(self.targets)

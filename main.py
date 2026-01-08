@@ -25,9 +25,6 @@ def main():
     cfg = _init_config(args)
     set_seed(cfg.seed)
 
-    log = get_logger()
-    log.info(f"🚀 NDE System | Model: {cfg.model_name} | Models: {cfg.total_models}")
-
     if args.eval:
         _run_evaluation(cfg, args)
     else:
@@ -35,7 +32,7 @@ def main():
 
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="NDE 训练系统")
+    p = argparse.ArgumentParser(description="NDE")
     p.add_argument("--config", type=str, default="config/default.yaml")
     p.add_argument("--eval", action="store_true")
     p.add_argument("--quick-test", action="store_true")
@@ -48,8 +45,10 @@ def _init_config(args):
         path = Path(__file__).parent / args.config
 
     base_cfg, experiments, eval_ckpts = Config.load_yaml(str(path))
+
+    # 应用 quick_test 模式
     if args.quick_test:
-        base_cfg.quick_test = True
+        base_cfg = base_cfg.apply_quick_test()
 
     # 将实验列表挂载到配置对象上便于后续传递 (临时)
     base_cfg._experiments = experiments
@@ -59,7 +58,9 @@ def _init_config(args):
 
 def _run_training(cfg):
     log = get_logger()
-    log.info(f"🚂 Training Mode | Experiments: {len(cfg._experiments)}")
+    log.info(
+        f"🚀 NDE | Training Mode | Models: {cfg.total_models} | Experiments: {len(cfg._experiments)}"
+    )
 
     train_loader, val_loader = load_dataset(cfg, mode="train")
 
@@ -73,8 +74,7 @@ def _run_training(cfg):
 
     for exp in cfg._experiments:
         log.info(f"\n🧪 Running: {exp.name}")
-        c = cfg.apply_quick_test() if cfg.quick_test else cfg
-        c = c.copy(experiment_name=exp.name, **exp.get_config_overrides())
+        c = cfg.copy(experiment_name=exp.name, **exp.get_config_overrides())
 
         # 每个实验作为子目录
         c.save_dir = str(batch_dir / exp.name)
@@ -94,6 +94,9 @@ def _run_training(cfg):
 
 
 def _run_evaluation(cfg, args):
+    log = get_logger()
+    log.info(f"🚀 NDE | Evaluation Mode | Checkpoints: {len(cfg._eval_ckpts)}")
+
     if not cfg._eval_ckpts:
         get_logger().error("❌ No checkpoints for evaluation")
         return

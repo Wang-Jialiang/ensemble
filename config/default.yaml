@@ -49,7 +49,7 @@ constants:
   plot_dpi: 300                     # 图表保存 DPI
 
   # Grad-CAM 分析参数
-  gradcam_num_samples: 50           # Grad-CAM 分析样本数
+  gradcam_num_samples: 100          # Grad-CAM 分析样本数
 
 # ==============================================================================
 # 可调参数
@@ -76,7 +76,7 @@ base:
   optimizer: "adamw"                # 优化器: "adamw", "sgd", "adam", "rmsprop"
   scheduler: "cosine"               # 调度器: "cosine", "none"
   weight_decay: 0.05                # 权重衰减: AdamW推荐 0.05, SGD推荐 0.0001
-  model_level_augmentation: true    # 模型级固定 seed (每个模型固定视角)
+  model_level_augmentation: false   # 模型级固定 seed (每个模型固定视角)
   early_stopping_patience: 30       # 早停耐心值 (验证集无改善的轮数)
 
   # [增强细节调整]
@@ -108,7 +108,7 @@ base:
   # [全局] 保存与日志配置 - 被 StagedEnsembleTrainer 使用
   # ==========================================================================
   save_every_n_epochs: 20           # 每 N 轮保存一次检查点
-  keep_last_n_checkpoints: 3        # 保留最近 N 个检查点
+  keep_last_n_checkpoints: 2        # 保留最近 N 个检查点
   use_wandb: true                  # 是否启用 Weights & Biases 日志
   wandb_project: "ensemble"         # wandb 项目名称
   log_level: "INFO"                 # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
@@ -215,37 +215,22 @@ experiments:
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
 # ==============================================================================
-# 新目录结构: ./output/training/{exp_name}/checkpoints/{exp_name}/best_acc
+# 只需修改此时间戳，所有检查点路径自动更新
+# 路径格式: ./output/training/{training_timestamp}/{exp_name}/checkpoints/best_acc
+training_timestamp: "20260108_161524"  # 修改这里即可
+
+# 实验列表 (路径由代码自动拼接)
 eval_checkpoints:
-  - name: "Exp01_Perlin_Curriculum"
-    path: "./output/Exp01_Perlin_Curriculum_20260106_220605/checkpoints/Exp01_Perlin_Curriculum/best_acc"
-
-  - name: "Exp02_Perlin_Fixed"
-    path: "./output/Exp02_Perlin_Fixed_20260106_224836/checkpoints/Exp02_Perlin_Fixed/best_acc"
-
-  - name: "Exp03_Cutout_Curriculum"
-    path: "./output/Exp03_Cutout_Curriculum_20260106_233422/checkpoints/Exp03_Cutout_Curriculum/best_acc"
-
-  - name: "Exp04_Cutout_Fixed"
-    path: "./output/Exp04_Cutout_Fixed_20260107_001524/checkpoints/Exp04_Cutout_Fixed/best_acc"
-
-  - name: "Exp05_GridMask_Curriculum"
-    path: "./output/Exp05_GridMask_Curriculum_20260107_005336/checkpoints/Exp05_GridMask_Curriculum/best_acc"
-
-  - name: "Exp06_GridMask_Fixed"
-    path: "./output/Exp06_GridMask_Fixed_20260107_014014/checkpoints/Exp06_GridMask_Fixed/best_acc"
-
-  - name: "Exp07_PixelHaS_Curriculum"
-    path: "./output/Exp07_PixelHaS_Curriculum_20260107_023054/checkpoints/Exp07_PixelHaS_Curriculum/best_acc"
-
-  - name: "Exp08_PixelHaS_Fixed"
-    path: "./output/Exp08_PixelHaS_Fixed_20260107_030244/checkpoints/Exp08_PixelHaS_Fixed/best_acc"
-
-  - name: "Exp09_Baseline_Curriculum"
-    path: "./output/Exp09_Baseline_Curriculum_20260107_035243/checkpoints/Exp09_Baseline_Curriculum/best_acc"
-
-  - name: "Exp10_Baseline_Fixed"
-    path: "./output/Exp10_Baseline_Fixed_20260107_043045/checkpoints/Exp10_Baseline_Fixed/best_acc"
+  - "Exp01_Perlin_Curriculum"
+  - "Exp02_Perlin_Fixed"
+  - "Exp03_Cutout_Curriculum"
+  - "Exp04_Cutout_Fixed"
+  - "Exp05_GridMask_Curriculum"
+  - "Exp06_GridMask_Fixed"
+  - "Exp07_PixelHaS_Curriculum"
+  - "Exp08_PixelHaS_Fixed"
+  - "Exp09_Baseline_Curriculum"
+  - "Exp10_Baseline_Fixed"
 
 # ==============================================================================
 # 数据生成配置 (generate.py 使用)
@@ -258,7 +243,7 @@ generation:
   batch_size: 12                                           # 启用VAE优化后可提高
   samples_per_group: 1000                                  # 每组样本数 (500足够评估)
   visualize: true                                          # 是否生成可视化对比图
-  num_vis: 1                                              # 每个类别/风格可视化的样本数
+  num_vis: 3                                              # 每个类别/风格可视化的样本数
 
   # SDXL 生成参数
   sdxl_height: 1024                                        # Text2Img 原始输出高度

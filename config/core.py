@@ -245,7 +245,24 @@ class Config:
         if "generation" in d:
             cfg.generation = GenerationConfig(**d["generation"])
         exps = [Experiment(**e) for e in d.get("experiments", [])]
-        return cfg, exps, d.get("eval_checkpoints", [])
+
+        # 处理 eval_checkpoints: 支持简化格式 (仅实验名列表)
+        raw_ckpts = d.get("eval_checkpoints", [])
+        ts = d.get("training_timestamp", "")
+        save_root = merged.get("save_root", "./output")
+
+        eval_ckpts = []
+        for item in raw_ckpts:
+            if isinstance(item, str):
+                # 简化格式: 仅实验名，自动拼接路径
+                exp_name = item
+                path = f"{save_root}/training/{ts}/{exp_name}/checkpoints/best_acc"
+                eval_ckpts.append({"name": exp_name, "path": path})
+            else:
+                # 原始格式: {name, path} 字典，保持不变
+                eval_ckpts.append(item)
+
+        return cfg, exps, eval_ckpts
 
     def __post_init__(self) -> None:
         """配置校验与派生字段注入"""

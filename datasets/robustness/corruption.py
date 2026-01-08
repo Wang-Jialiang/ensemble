@@ -110,10 +110,7 @@ class CorruptionDataset:
         """确保预生成数据包已安装"""
         labels_path = self.data_dir / "labels.npy"
         if not labels_path.exists():
-            raise FileNotFoundError(
-                f"未找到预生成数据: {labels_path}\n"
-                f"请运行: python -m ensemble.datasets.robustness.generate --type corruption --dataset {dataset_name}"
-            )
+            raise FileNotFoundError(f"未找到预生成数据: {labels_path}")
 
     def _init_statistics(self, DatasetClass):
         """初始化数据集统计信息"""
