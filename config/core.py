@@ -64,6 +64,7 @@ class Config:
     seed: int  # 随机种子
     optimizer: str  # 优化器: "adamw", "sgd", "adam", "rmsprop"
     scheduler: str  # 调度器: "cosine", "step", "plateau", "none"
+    min_lr: float  # 学习率调度器最小值 (cosine 衰减终点)
     label_smoothing: float  # 标签平滑系数 (0.0=不使用, 0.1=常用值)
 
     # ==========================================================================
@@ -98,8 +99,6 @@ class Config:
     # ==========================================================================
     # [全局] 保存与日志配置 - 被 StagedEnsembleTrainer 使用
     # ==========================================================================
-    save_every_n_epochs: int  # 每 N 轮保存一次检查点
-    keep_last_n_checkpoints: int  # 保留最近 N 个检查点
     use_wandb: bool  # 是否启用 Weights & Biases 日志
     wandb_project: str  # wandb 项目名称
     log_level: str  # 日志级别: "DEBUG", "INFO", "WARNING", "ERROR"
@@ -172,13 +171,12 @@ class Config:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
     # 自动计算/生成字段 (有默认值, 禁止人工初始化)
-    save_dir: str = field(default="", init=False)  # 保持向后兼容，默认指向 training_dir
-    training_dir: str = field(
+    save_dir: str = field(
         default="", init=False
     )  # 训练产物目录: output/training/{exp_name}/
     evaluation_dir: str = field(
         default="", init=False
-    )  # 评估产物目录: output/evaluation/{exp_name}_{ts}/
+    )  # 评估产物目录: output/evaluation/{ts}/
     num_classes: int = field(default=0, init=False)
     image_size: int = field(default=0, init=False)
     dataset_mean: List[float] = field(
@@ -256,7 +254,7 @@ class Config:
             if isinstance(item, str):
                 # 简化格式: 仅实验名，自动拼接路径
                 exp_name = item
-                path = f"{save_root}/training/{ts}/{exp_name}/checkpoints/best_acc"
+                path = f"{save_root}/training/{ts}/{exp_name}/checkpoints/best"
                 eval_ckpts.append({"name": exp_name, "path": path})
             else:
                 # 原始格式: {name, path} 字典，保持不变
@@ -273,12 +271,9 @@ class Config:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         exp_name = self.experiment_name or "exp"
 
-        # 主目录结构: output/training/{exp_name}/ 和 output/evaluation/{ts}/
-        self.training_dir = str(Path(self.save_root) / "training" / exp_name)
+        # 主目录结构: output/training/{ts}/{exp_name}/ 和 output/evaluation/{ts}/
+        self.save_dir = str(Path(self.save_root) / "training" / ts / exp_name)
         self.evaluation_dir = str(Path(self.save_root) / "evaluation" / ts)
-
-        # save_dir 保持向后兼容，默认指向 training_dir
-        self.save_dir = self.training_dir
         # 注意: 目录创建由调用方负责 (main.py 中的 ensure_dir)
 
     def _setup_hardware(self):

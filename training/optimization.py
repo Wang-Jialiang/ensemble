@@ -38,7 +38,7 @@ def create_optimizer(
 
 
 def create_scheduler(
-    optimizer, name, total_epochs
+    optimizer, name, total_epochs, min_lr: float = 0.0
 ) -> Optional[optim.lr_scheduler.LRScheduler]:
     """创建学习率调度器 (大纲化)"""
     name = name.lower()
@@ -49,7 +49,9 @@ def create_scheduler(
         optimizer._step_count = 1
 
     if name == "cosine":
-        return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
+        return optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_epochs, eta_min=min_lr
+        )
     if name == "none":
         return None
 

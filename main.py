@@ -83,8 +83,8 @@ def _run_training(cfg):
         train_experiment(cfg=c, train_loader=train_loader, val_loader=val_loader)
 
         # 收集 checkpoint 路径
-        # 实际路径: batch_dir/exp_name/checkpoints/best_acc.pt
-        ckpt_path = Path(c.save_dir) / "checkpoints" / "best_acc.pt"
+        # 实际路径: batch_dir/exp_name/checkpoints/best
+        ckpt_path = Path(c.save_dir) / "checkpoints" / "best"
         if ckpt_path.exists():
             generated_ckpts.append(
                 {"name": f"{exp.name}", "path": str(ckpt_path), "model": c.model_name}

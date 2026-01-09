@@ -69,7 +69,9 @@ class GPUWorker:
                 self.cfg.weight_decay,
                 sgd_momentum=self.cfg.sgd_momentum,
             )
-            sch = create_scheduler(opt, self.cfg.scheduler, self.cfg.total_epochs)
+            sch = create_scheduler(
+                opt, self.cfg.scheduler, self.cfg.total_epochs, self.cfg.min_lr
+            )
 
             ms.append(m)
             os.append(opt)

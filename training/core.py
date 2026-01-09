@@ -31,90 +31,28 @@ class CheckpointMixin:
     """检查点管理 Mixin (大纲化)"""
 
     def _save_checkpoint(self, tag: str):
-        """保存当前训练状态与模型权重"""
+        """保存模型权重"""
         path = self._get_checkpoint_dir(tag)
         ensure_dir(path)
 
-        # 1. 保存各 Worker 的模型
         for worker in self.workers:
             worker.save_models(str(path), self.name)
-
-        # 2. 保存 Trainer 状态快照
-        self._write_state_file(path)
         self.logger.info(f"💾 Checkpoint Saved: {tag}")
 
     def load_checkpoint(self, tag: str = "best") -> bool:
-        """从指定 tag 加载检查点"""
+        """从指定 tag 加载模型权重"""
         path = self._get_checkpoint_dir(tag)
         if not path.exists():
             self.logger.warning(f"⚠️ Checkpoint 不存在: {path}")
             return False
 
-        # 1. 加载模型
         for worker in self.workers:
             worker.load_models(str(path), self.name)
-
-        # 2. 恢复状态变量
-        self._read_state_file(path)
         return True
 
     def _get_checkpoint_dir(self, tag: str) -> Path:
         """统一路径生成逻辑 (save_dir 已包含实验名)"""
         return Path(self.cfg.save_dir) / "checkpoints" / tag
-
-    def _write_state_file(self, path: Path):
-        """写入 trainer 状态二进制文件"""
-        # 计算当前累计训练时间 (从 train 开始到现在)
-        current_training_time = (
-            time.time() - self._train_start_time
-            if hasattr(self, "_train_start_time")
-            else self.total_training_time
-        )
-        state = {
-            "epoch": len(self.history["epoch"]),
-            "best_val_loss": self._best_val_loss,
-            "best_val_acc": self._best_val_acc,
-            "best_epoch": self._best_epoch,
-            "history": self.history,
-            "early_stopping_counter": self.early_stopping.counter,
-            "total_time": current_training_time,
-            "aug_method": self.augmentation_method,
-            "params": (self.use_curriculum, self.fixed_ratio, self.fixed_prob),
-        }
-        torch.save(state, path / "trainer_state.pth")
-
-    def _read_state_file(self, path: Path):
-        """解析并恢复状态"""
-        file = path / "trainer_state.pth"
-        if not file.exists():
-            return
-
-        s = torch.load(file, weights_only=False)
-        self._best_val_loss, self._best_val_acc = (
-            s["best_val_loss"],
-            s.get("best_val_acc", 0.0),
-        )
-        self._best_epoch = s["best_epoch"]
-        self.history = s["history"]
-        self.early_stopping.counter = s.get("early_stopping_counter", 0)
-        self.total_training_time = s.get("total_time", 0.0)
-        self.logger.info(f"✅ State Restored (Best Loss: {self._best_val_loss:.4f})")
-
-    def _cleanup_old_checkpoints(self):
-        """清理冗余的周期性检查点"""
-        base = Path(self.cfg.save_dir) / "checkpoints"
-        if not base.exists():
-            return
-
-        dirs = sorted(
-            [d for d in base.iterdir() if d.name.startswith("epoch_")],
-            key=lambda x: int(x.name.split("_")[1]),
-        )
-
-        if len(dirs) > self.cfg.keep_last_n_checkpoints:
-            for d in dirs[: -self.cfg.keep_last_n_checkpoints]:
-                shutil.rmtree(d)
-                self.logger.info(f"🗑️ Cleaned: {d.name}")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -168,7 +106,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         # 4. 初始化状态跟踪变量
         self._init_tracking_structures()
-        cfg.save()  # 持久化当前运行配置
 
     def _init_hardware_optimizations(self):
         """配置 Cuda 后端加速选项"""
@@ -184,13 +121,10 @@ class StagedEnsembleTrainer(CheckpointMixin):
         self.wandb_run = None
         if getattr(self.cfg, "use_wandb", False):
             try:
-                from datetime import datetime
-
                 import wandb
 
-                project_name = f"{getattr(self.cfg, 'wandb_project', 'ensemble')}_{datetime.now().strftime('%Y%m%d')}"
                 self.wandb_run = wandb.init(
-                    project=project_name,
+                    project=getattr(self.cfg, "wandb_project", "ensemble"),
                     name=self.name,
                     config=self._get_wandb_config(),
                     mode="online",
@@ -237,7 +171,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             metrics={"val_loss": "min", "val_acc": "max"},
             criteria="any",
         )
-        self._best_val_loss, self._best_val_acc, self._best_epoch = float("inf"), 0.0, 0
+        self._best_val_acc = 0.0
         self.history_saver = HistorySaver(self.cfg.save_dir)
 
     def get_models(self) -> List[nn.Module]:
@@ -420,7 +354,8 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
                 # 3. 生命周期钩子: 记录、持久化、早停
                 self._handle_epoch_post(epoch, stats)
-                if self.early_stopping(stats, epoch):
+                # 早停仅在第三阶段 (Finetune) 生效
+                if current_stage == 3 and self.early_stopping(stats, epoch):
                     break
 
             self._finalize_training()
@@ -468,27 +403,17 @@ class StagedEnsembleTrainer(CheckpointMixin):
         }
 
     def _handle_epoch_post(self, epoch, stats):
-        """处理 Epoch 结束后的辅助动作 (日志、快照、清理)"""
-        # 1. 记录历史与 TensorBoard
+        """处理 Epoch 结束后的辅助动作 (日志、快照)"""
+        # 1. 记录历史
         self._record_metrics(epoch, stats)
 
-        # 2. 处理最佳模型保存
-        if stats["val_loss"] < self._best_val_loss:
-            self._best_val_loss, self._best_epoch = stats["val_loss"], epoch
-            self._save_checkpoint("best")
-            self.logger.info(f"   🏆 New Best Loss: {stats['val_loss']:.4f}")
-
+        # 2. 保存最佳模型 (基于 accuracy)
         if stats["val_acc"] > self._best_val_acc:
             self._best_val_acc = stats["val_acc"]
-            self._save_checkpoint("best_acc")
-            self.logger.info(f"   ⭐ New Best Acc: {stats['val_acc']:.2f}%")
+            self._save_checkpoint("best")
+            self.logger.info(f"   🏆 New Best Acc: {stats['val_acc']:.2f}%")
 
-        # 3. 定期检查点
-        if (epoch + 1) % self.cfg.save_every_n_epochs == 0:
-            self._save_checkpoint(f"epoch_{epoch + 1}")
-            self._cleanup_old_checkpoints()
-
-        # 4. 打印汇总日志
+        # 3. 打印汇总日志
         self._log_epoch_summary(epoch, stats)
 
     def _log_training_start(self):
@@ -516,13 +441,13 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
             wandb.log(
                 {
-                    "epoch": epoch + 1,
                     "train_loss": stats["train_loss"],
                     "val_loss": stats["val_loss"],
                     "val_acc": stats["val_acc"],
                     "lr": stats["lr"],
                     "mask_ratio": stats["mask_ratio"],
                     "mask_prob": stats["mask_prob"],
+                    "epoch_time": stats["time"],
                 }
             )
 
@@ -537,7 +462,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
     def _finalize_training(self):
         self.total_training_time = time.time() - self._train_start_time
         self.logger.info(f"\n⏱️ Total Time: {format_duration(self.total_training_time)}")
-        self._save_checkpoint("final")
         self.history_saver.save(self.history)
 
     def _handle_training_error(self, error):
