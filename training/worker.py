@@ -84,19 +84,12 @@ class GPUWorker:
             raise ValueError(f"不支持的增强方法: {method}")
 
         self.augmentation = AUGMENTATION_REGISTRY[method](self.device, self.cfg)
-        self._use_model_level = self.cfg.model_level_augmentation
-
-        if self._use_model_level:
-            self.augmentation.init_model_seeds(num_models=self.num_models)
 
     def precompute_masks(self, target_ratio: float):
-        """预计算mask（仅样本级增强使用）
+        """预计算 mask 池
 
-        样本级增强：每个 epoch 用当前 ratio 预计算共享 mask 池
-        模型级增强：跳过，因为使用固定 seed 在 apply 时动态生成
+        每个 epoch 用当前 ratio 预计算共享 mask 池。
         """
-        if self._use_model_level:
-            return
         if hasattr(self.augmentation, "precompute_masks"):
             self.augmentation.precompute_masks(target_ratio)
 
@@ -165,8 +158,7 @@ class GPUWorker:
         if not use_mask:
             return x, y
 
-        model_idx = idx if self._use_model_level else None
-        return self.augmentation.apply(x, y, ratio, prob, model_index=model_idx)
+        return self.augmentation.apply(x, y, ratio, prob)
 
     def _forward_backward(self, model, x, y, criterion):
         """内部执行计算链路"""
@@ -206,32 +198,20 @@ class GPUWorker:
         return torch.cat(all_logits, dim=0)
 
     def save_models(self, save_dir: str, prefix: str):
-        """保存模型"""
-        for i, (model, optimizer, scheduler) in enumerate(
-            zip(self.models, self.optimizers, self.schedulers)
-        ):
-            state = {
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-            }
+        """保存模型权重"""
+        for i, model in enumerate(self.models):
             save_path = Path(save_dir) / f"{prefix}_gpu{self.gpu_id}_model{i}.pth"
-            torch.save(state, save_path)
+            torch.save(model.state_dict(), save_path)
 
     def load_models(self, save_dir: str, prefix: str):
-        """加载模型"""
-        for i, (model, optimizer, scheduler) in enumerate(
-            zip(self.models, self.optimizers, self.schedulers)
-        ):
+        """加载模型权重"""
+        for i, model in enumerate(self.models):
             load_path = Path(save_dir) / f"{prefix}_gpu{self.gpu_id}_model{i}.pth"
             if load_path.exists():
-                state = torch.load(
+                state_dict = torch.load(
                     load_path, map_location=self.device, weights_only=False
                 )
-                model.load_state_dict(state["model_state_dict"])
-                optimizer.load_state_dict(state["optimizer_state_dict"])
-                if scheduler and state.get("scheduler_state_dict"):
-                    scheduler.load_state_dict(state["scheduler_state_dict"])
+                model.load_state_dict(state_dict)
 
     def broadcast_backbone_and_reinit_heads(self, backbone_state_dict: dict):
         """用共享 backbone 初始化所有模型，并重新初始化各模型的 classifier head

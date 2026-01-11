@@ -53,7 +53,6 @@ def evaluate_ood(
     fpr95_ent = _compute_fpr_at_95tpr(-np.concatenate([id_ent, ood_ent]), y)
 
     res = {
-        "ood_dataset": ood_name,
         "ood_auroc_msp": auroc_msp,
         "ood_auroc_entropy": auroc_ent,
         "ood_fpr95_msp": fpr95_msp,

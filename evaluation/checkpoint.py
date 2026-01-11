@@ -82,15 +82,9 @@ class CheckpointLoader:
             cfg: 配置对象
             device: 目标设备 (如 "cuda:0", "cuda:1")
         """
-        state = torch.load(model_file, weights_only=False)
+        state_dict = torch.load(model_file, weights_only=False)
 
         model = ModelFactory.create_model(cfg.model_name, num_classes=cfg.num_classes)
-
-        # 支持两种格式: dict 包装 或直接 state_dict
-        if isinstance(state, dict) and "model_state_dict" in state:
-            state_dict = state["model_state_dict"]
-        else:
-            state_dict = state
 
         # 修复并加载
         state_dict = cls._fix_state_dict_keys(state_dict)
@@ -116,9 +110,7 @@ class CheckpointLoader:
         Returns:
             context: {
                 'name': 实验名称,
-                'models': List[nn.Module],
-                'training_time': float,
-                'config': dict
+                'models': List[nn.Module]
             }
         """
         checkpoint_dir = Path(checkpoint_path)
@@ -126,21 +118,11 @@ class CheckpointLoader:
             raise FileNotFoundError(f"Checkpoint 不存在: {checkpoint_path}")
 
         # 推断实验名称
-        experiment_name = checkpoint_dir.parent.name
-
-        # 读取训练状态
-        state_path = checkpoint_dir / "trainer_state.pth"
-        training_time = 0.0
-        train_config = {}
-
-        if state_path.exists():
-            state = torch.load(state_path, weights_only=False)
-            training_time = state.get("total_time", 0.0)  # 与 core.py 保存时的键名一致
-            params = state.get("params", (False, 0.0, 0.0))
-            train_config = {
-                "augmentation_method": state.get("aug_method", "unknown"),
-                "use_curriculum": params[0] if params else False,
-            }
+        # 路径格式: {save_root}/training/{ts}/{exp_name}/checkpoints/best
+        # checkpoint_dir = .../checkpoints/best
+        # checkpoint_dir.parent = .../checkpoints
+        # checkpoint_dir.parent.parent = .../{exp_name}
+        experiment_name = checkpoint_dir.parent.parent.name
 
         # 查找模型文件
         model_files = CheckpointLoader._find_model_files(
@@ -173,6 +155,4 @@ class CheckpointLoader:
         return {
             "name": experiment_name,
             "models": models,
-            "training_time": training_time,
-            "config": train_config,
         }

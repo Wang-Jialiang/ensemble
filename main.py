@@ -74,10 +74,16 @@ def _run_training(cfg):
 
     for exp in cfg._experiments:
         log.info(f"\n🧪 Running: {exp.name}")
+
+        # 🔑 关键：重置随机种子，确保每个实验从相同初始状态开始
+        # 这保证了不同实验之间唯一的差异只有遮挡图案
+        set_seed(cfg.seed)
+
         c = cfg.copy(experiment_name=exp.name, **exp.get_config_overrides())
 
         # 每个实验作为子目录
-        c.save_dir = str(batch_dir / exp.name)
+        c.training_base_dir = str(batch_dir)  # 共享时间戳目录 (日志/历史)
+        c.save_dir = str(batch_dir / exp.name)  # 实验子目录 (检查点)
         ensure_dir(c.save_dir)
 
         train_experiment(cfg=c, train_loader=train_loader, val_loader=val_loader)

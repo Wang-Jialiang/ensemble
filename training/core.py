@@ -172,7 +172,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             criteria="any",
         )
         self._best_val_acc = 0.0
-        self.history_saver = HistorySaver(self.cfg.save_dir)
+        self.history_saver = HistorySaver(self.cfg.training_base_dir)
 
     def get_models(self) -> List[nn.Module]:
         """获取所有模型列表 (与其他 Trainer 接口一致)"""
@@ -186,8 +186,8 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-        # 文件输出 (直接放在实验目录下)
-        log_path = Path(self.cfg.save_dir) / "train.log"
+        # 文件输出 (放在时间戳目录下，文件名包含实验名)
+        log_path = Path(self.cfg.training_base_dir) / f"{self.name}_train.log"
         file_handler = logging.FileHandler(log_path, mode="w")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -220,7 +220,8 @@ class StagedEnsembleTrainer(CheckpointMixin):
         if epoch < cfg.warmup_epochs:
             return 1, "Warmup", 0.0, 0.0, False
         elif epoch < cfg.warmup_epochs + cfg.progressive_epochs:
-            progress = (epoch - cfg.warmup_epochs) / cfg.progressive_epochs
+            # 使用 (epochs - 1) 确保最后一个 epoch 精确达到 end 值
+            progress = (epoch - cfg.warmup_epochs) / max(cfg.progressive_epochs - 1, 1)
             mask_ratio = (
                 cfg.mask_start_ratio
                 + (cfg.mask_end_ratio - cfg.mask_start_ratio) * progress
@@ -233,20 +234,28 @@ class StagedEnsembleTrainer(CheckpointMixin):
         else:
             return 3, "Finetune", cfg.finetune_mask_ratio, cfg.finetune_mask_prob, True
 
-    def _train_epoch(self, train_loader: DataLoader, epoch: int) -> float:
-        """训练单个 Epoch (大纲化)"""
+    def _train_epoch(self, train_loader: DataLoader, epoch: int) -> Tuple[float, float]:
+        """训练单个 Epoch (大纲化)
+
+        Returns:
+            Tuple[float, float]: (train_loss, current_lr) - 本 epoch 的损失和使用的学习率
+        """
         # 1. 准备当前阶段参数
         *_, m_ratio, m_prob, use_mask = self._get_stage_info(epoch)
         criterion = nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
 
-        # 2. 预热 Workers (如预计算 Mask 池)
+        # 2. 记录本 epoch 使用的 LR（在 step 之前）
+        current_lr = self.workers[0].get_lr()
+
+        # 3. 预热 Workers (如预计算 Mask 池)
         for w in self.workers:
             w.precompute_masks(m_ratio)
 
-        # 3. 执行批次迭代
-        return self._run_batch_iteration(
+        # 4. 执行批次迭代
+        train_loss = self._run_batch_iteration(
             train_loader, epoch, criterion, m_ratio, m_prob, use_mask
         )
+        return train_loss, current_lr
 
     def _run_batch_iteration(self, loader, epoch, criterion, m_ratio, m_prob, use_mask):
         """具体执行张量流动与梯度更新 (使用 Rich Progress)"""
@@ -267,14 +276,13 @@ class StagedEnsembleTrainer(CheckpointMixin):
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
-            TextColumn("| Loss: [bold magenta]{task.fields[loss]}"),
             TimeRemainingColumn(),
             console=console,
         ) as progress:
-            desc = f"Epoch {epoch + 1:3d} [LR={self.workers[0].get_lr():.6f}]"
+            desc = f"Epoch {epoch + 1:3d}"
             if is_warmup_single_model:
                 desc += " [Warmup-SingleModel]"
-            task_id = progress.add_task(desc, total=len(loader), loss="0.0000")
+            task_id = progress.add_task(desc, total=len(loader))
 
             for inputs, targets in loader:
                 if is_warmup_single_model:
@@ -301,7 +309,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
                 total_loss += batch_loss
                 n += 1
-                progress.update(task_id, advance=1, loss=f"{total_loss / n:.4f}")
+                progress.update(task_id, advance=1)
 
         # 步进调度器 (所有模型，保持 LR 同步)
         for w in self.workers:
@@ -354,8 +362,9 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
                 # 3. 生命周期钩子: 记录、持久化、早停
                 self._handle_epoch_post(epoch, stats)
-                # 早停仅在第三阶段 (Finetune) 生效
-                if current_stage == 3 and self.early_stopping(stats, epoch):
+                # 早停在 warmup + progressive 阶段后生效 (所有模式统一)
+                finetune_start = self.cfg.warmup_epochs + self.cfg.progressive_epochs
+                if epoch >= finetune_start and self.early_stopping(stats, epoch):
                     break
 
             self._finalize_training()
@@ -372,7 +381,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 wandb_dir = Path.cwd() / "wandb"
                 if wandb_dir.exists():
                     shutil.rmtree(wandb_dir, ignore_errors=True)
-                    self.logger.info("🧹 Cleaned up wandb local cache")
 
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
@@ -387,7 +395,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
     def _run_epoch_cycle(self, train_loader, val_loader, epoch):
         """执行单个 Epoch 的计算循环并收集指标"""
         t0 = time.time()
-        t_loss = self._train_epoch(train_loader, epoch)
+        t_loss, current_lr = self._train_epoch(train_loader, epoch)
         v_loss, v_acc = self._validate(val_loader)
 
         # 获取当前元数据
@@ -398,7 +406,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             "val_acc": v_acc,
             "mask_ratio": m_ratio,
             "mask_prob": m_prob,
-            "lr": self.workers[0].get_lr(),
+            "lr": current_lr,  # 使用本 epoch 实际使用的 LR
             "time": time.time() - t0,
         }
 
@@ -444,31 +452,28 @@ class StagedEnsembleTrainer(CheckpointMixin):
                     "train_loss": stats["train_loss"],
                     "val_loss": stats["val_loss"],
                     "val_acc": stats["val_acc"],
-                    "lr": stats["lr"],
-                    "mask_ratio": stats["mask_ratio"],
-                    "mask_prob": stats["mask_prob"],
                     "epoch_time": stats["time"],
-                }
+                },
+                step=epoch + 1,  # x 轴从 1 开始
             )
 
     def _log_epoch_summary(self, epoch, stats):
-        _, s_name, _, _, _ = self._get_stage_info(epoch)
         self.logger.info(
-            f"Epoch {epoch + 1:3d} [{s_name:11s}] | "
+            f"Epoch {epoch + 1:3d} | "
             f"T-Loss: {stats['train_loss']:.4f} | V-Loss: {stats['val_loss']:.4f} | "
-            f"V-Acc: {stats['val_acc']:.2f}% | LR: {stats['lr']:.6f} | {stats['time']:.1f}s"
+            f"V-Acc: {stats['val_acc']:.2f}% | {stats['time']:.1f}s"
         )
 
     def _finalize_training(self):
         self.total_training_time = time.time() - self._train_start_time
         self.logger.info(f"\n⏱️ Total Time: {format_duration(self.total_training_time)}")
-        self.history_saver.save(self.history)
+        self.history_saver.save(self.history, filename=f"{self.name}_history")
 
     def _handle_training_error(self, error):
         self.logger.error(f"\n❌ Training Failed: {error}")
         self.total_training_time = time.time() - self._train_start_time
         self._save_checkpoint("error")
-        self.history_saver.save(self.history)
+        self.history_saver.save(self.history, filename=f"{self.name}_history")
 
     def _broadcast_warmup_backbone(self):
         """从第一个模型获取 backbone，广播到所有子模型并重新初始化各自的 classifier head"""

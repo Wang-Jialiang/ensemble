@@ -136,7 +136,6 @@ class Config:
     gridmask_d_ratio_max: float  # GridMask 网格单元最大尺寸比例 (默认 0.4)
     perlin_octaves_large: int  # Perlin octaves (图像 >= 64 时, 默认 4)
     perlin_octaves_small: int  # Perlin octaves (图像 < 64 时, 默认 3)
-    model_level_augmentation: bool  # 是否启用模型级固定 seed (每个模型固定视角)
 
     # ==========================================================================
     # [评估专用] 可视化参数
@@ -173,12 +172,16 @@ class Config:
     # 自动计算/生成字段 (有默认值, 禁止人工初始化)
     save_dir: str = field(
         default="", init=False
-    )  # 训练产物目录: output/training/{exp_name}/
+    )  # 训练产物目录: output/training/{ts}/{exp_name}/
+    training_base_dir: str = field(
+        default="", init=False
+    )  # 时间戳目录: output/training/{ts}/ (日志/历史文件)
     evaluation_dir: str = field(
         default="", init=False
     )  # 评估产物目录: output/evaluation/{ts}/
     num_classes: int = field(default=0, init=False)
     image_size: int = field(default=0, init=False)
+    num_channels: int = field(default=3, init=False)  # 图像通道数 (RGB=3)
     dataset_mean: List[float] = field(
         default_factory=list, init=False
     )  # 数据集均值 (Post-init 填充)
@@ -272,7 +275,8 @@ class Config:
         exp_name = self.experiment_name or "exp"
 
         # 主目录结构: output/training/{ts}/{exp_name}/ 和 output/evaluation/{ts}/
-        self.save_dir = str(Path(self.save_root) / "training" / ts / exp_name)
+        self.training_base_dir = str(Path(self.save_root) / "training" / ts)
+        self.save_dir = str(Path(self.training_base_dir) / exp_name)
         self.evaluation_dir = str(Path(self.save_root) / "evaluation" / ts)
         # 注意: 目录创建由调用方负责 (main.py 中的 ensure_dir)
 

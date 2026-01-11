@@ -400,10 +400,5 @@ def _summarize_adv_results(s, eps, alpha, steps, log):
         "clean_acc": 100 * s["clean"] / t,
         "fgsm_acc": 100 * s["fgsm"] / t,
         "pgd_acc": 100 * s["pgd"] / t,
-        "eps": eps,
-        "eps_255": eps * 255,
-        "alpha": alpha,
-        "pgd_steps": steps,
-        "num_samples": t,
     }
     return res

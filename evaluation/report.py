@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from ..config import Config
-from ..utils import ensure_dir, format_duration, get_logger
+from ..utils import ensure_dir, get_logger
 from .adversarial import evaluate_adversarial
 from .checkpoint import CheckpointLoader
 from .corruption_robustness import evaluate_corruption
@@ -27,6 +27,7 @@ from .landscape import ModelDistanceCalculator
 from .metrics import MetricsCalculator
 from .ood import evaluate_ood
 from .saver import ResultsSaver
+from .scoring import DIMENSION_DISPLAY, DIMENSION_WEIGHTS, ScoreCalculator
 from .strategies import get_ensemble_fn
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -57,11 +58,14 @@ class ReportGenerator:
 
     @staticmethod
     def _evaluate_models(
-        models, exp_name, test_loader, cfg, device, training_time=0.0, **datasets
+        models, exp_name, test_loader, cfg, device, **datasets
     ) -> Dict[str, Any]:
         """通用模型评估方法 - 生命周期钩子模式"""
-        get_logger().info(f"\n📊 Evaluating: {exp_name}")
-        res = {"experiment_name": exp_name, "training_time_seconds": training_time}
+        log = get_logger()
+        log.info(f"\n┌{'─' * 60}")
+        log.info(f"│ 📊 {exp_name}")
+        log.info(f"└{'─' * 60}")
+        res = {"experiment_name": exp_name}
 
         # 1. 标准标准指标 (Acc, ECE, NLL)
         res["standard_metrics"] = ReportGenerator._run_standard_eval(
@@ -82,7 +86,7 @@ class ReportGenerator:
 
     @staticmethod
     def _run_standard_eval(models, loader, cfg, device):
-        get_logger().info("   🔍 Standard evaluation...")
+        get_logger().info("  ├─ 🔍 Standard metrics")
         all_l, all_t = get_all_models_logits(models, loader, device)
         return MetricsCalculator(cfg.num_classes, cfg.ece_n_bins).calculate_all_metrics(
             all_l, all_t, get_ensemble_fn(cfg)
@@ -93,13 +97,13 @@ class ReportGenerator:
         r = {"corruption_results": None, "ood_results": None}
 
         if ds.get("corruption_dataset"):
-            get_logger().info("   🔍 Corruption evaluation...")
+            get_logger().info("  ├─ 🌪️ Corruption robustness")
             r["corruption_results"] = evaluate_corruption(
                 models, ds["corruption_dataset"], cfg
             )
 
         if ds.get("ood_dataset"):
-            get_logger().info("   🔍 OOD detection evaluation...")
+            get_logger().info("  ├─ 🔮 OOD detection")
             r["ood_results"] = evaluate_ood(
                 models,
                 loader,
@@ -113,13 +117,13 @@ class ReportGenerator:
     def _run_analysis_eval(models, cfg, loader, **ds):
         a = {"adversarial_results": None, "gradcam_metrics": None}
         if ds.get("run_adversarial", True):
-            get_logger().info("   🔍 Adversarial evaluation...")
+            get_logger().info("  ├─ ⚔️ Adversarial robustness")
             a["adversarial_results"] = evaluate_adversarial(
                 models, loader, cfg=cfg, logger=get_logger()
             )
 
         if ds.get("run_gradcam", False):
-            get_logger().info("   🔍 Grad-CAM analysis...")
+            get_logger().info("  └─ 🔍 Grad-CAM analysis")
             a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality(
                 [ModelListWrapper(models)],
                 loader,
@@ -130,39 +134,270 @@ class ReportGenerator:
 
     @classmethod
     def _generate_report(cls, results: Dict[str, Any]) -> str:
-        """生成文本报告 (大纲化渲染)"""
+        """生成增强版文本报告（含评分系统）"""
         lines = []
         exps = list(results.keys())
 
-        # 1. 绘制 Header
-        lines.append("=" * 115)
-        lines.append(
-            "📊 EXPERIMENT COMPARISON" if len(exps) > 1 else f"📊 RESULTS: {exps[0]}"
-        )
+        # 0. 计算所有实验分数
+        all_scores = {
+            name: ScoreCalculator.calculate_all_scores(r) for name, r in results.items()
+        }
+
+        # 1. 综合评分卡 (NEW)
+        lines.extend(cls._format_scorecard(results, exps, all_scores))
+
+        # 2. 各维度详细分解 (NEW)
+        lines.extend(cls._format_dimension_breakdown(results, exps, all_scores))
+
+        # 3. 分隔线
+        lines.append("\n" + "=" * 115)
+        lines.append("📋 DETAILED METRICS")
         lines.append("=" * 115)
 
-        # 2. 核心性能对比表
+        # 4. 原有核心性能对比表 (保留)
         lines.extend(cls._format_perf_table(results, exps))
 
-        # 3. 多样性/公平性/CAM 表格
+        # 5. 多样性/公平性/CAM 表格 (保留)
         lines.extend(cls._format_diversity_table(results, exps))
 
-        # 4. CKA 详情 + EOD/Bottom-K
+        # 6. CKA 详情 + EOD/Bottom-K (保留)
         lines.extend(cls._format_additional_metrics(results, exps))
 
-        # 5. 鲁棒性专门板块
+        # 7. 鲁棒性专门板块 (保留)
         lines.extend(cls._format_robustness_sections(results, exps))
 
         return "\n".join(lines)
+
+    @classmethod
+    def _format_scorecard(cls, results, names, all_scores):
+        """生成综合评分卡"""
+        lines = []
+
+        # Header
+        lines.append("═" * 115)
+        lines.append("                              🏆 ENSEMBLE EVALUATION SCORECARD")
+        lines.append("═" * 115)
+        lines.append("")
+
+        # 排序实验
+        sorted_exps = sorted(
+            names, key=lambda n: all_scores[n]["total_score"], reverse=True
+        )
+
+        # 表头 - 动态构建维度列
+        dim_order = [
+            "accuracy",
+            "calibration",
+            "diversity",
+            "fairness",
+            "corruption",
+            "ood",
+            "adversarial",
+            "interpretability",
+        ]
+        dim_headers = []
+        for dim in dim_order:
+            if dim in DIMENSION_DISPLAY:
+                icon, _, short = DIMENSION_DISPLAY[dim]
+                dim_headers.append(f"{short[:6]:^6}")
+
+        header = (
+            f"│ {'Experiment':<22} │ {'Score':^6} │ {'Grade':^5} │ "
+            + " │ ".join(dim_headers)
+            + " │"
+        )
+        sep_line = (
+            "├"
+            + "─" * 24
+            + "┼"
+            + "─" * 8
+            + "┼"
+            + "─" * 7
+            + "┼"
+            + ("─" * 8 + "┼") * len(dim_headers)
+        )
+        sep_line = sep_line[:-1] + "┤"
+
+        lines.append(
+            "┌"
+            + "─" * 24
+            + "┬"
+            + "─" * 8
+            + "┬"
+            + "─" * 7
+            + "┬"
+            + ("─" * 8 + "┬") * len(dim_headers)
+        )
+        lines[-1] = lines[-1][:-1] + "┐"
+        lines.append(header)
+        lines.append(sep_line)
+
+        # 数据行
+        for rank, name in enumerate(sorted_exps):
+            score_data = all_scores[name]
+            medal = ScoreCalculator.get_medal(rank, len(sorted_exps))
+
+            # 截断名称
+            display_name = name[:18] if len(name) > 18 else name
+            if medal:
+                display_name = f"{medal} {display_name}"
+
+            # 维度分数
+            dim_scores = []
+            for dim in dim_order:
+                if dim in score_data["dimensions"]:
+                    dim_score = score_data["dimensions"][dim]["score"]
+                    dim_scores.append(f"{dim_score:^6.0f}")
+                else:
+                    dim_scores.append(f"{'N/A':^6}")
+
+            row = (
+                f"│ {display_name:<22} │ {score_data['total_score']:^6.1f} │ {score_data['grade']:^5} │ "
+                + " │ ".join(dim_scores)
+                + " │"
+            )
+            lines.append(row)
+
+        lines.append(
+            "└"
+            + "─" * 24
+            + "┴"
+            + "─" * 8
+            + "┴"
+            + "─" * 7
+            + "┴"
+            + ("─" * 8 + "┴") * len(dim_headers)
+        )
+        lines[-1] = lines[-1][:-1] + "┘"
+        lines.append("")
+
+        # 图例
+        lines.append(
+            "📌 维度权重: "
+            + " | ".join(
+                [
+                    f"{DIMENSION_DISPLAY[d][0]}{DIMENSION_DISPLAY[d][2]}({int(DIMENSION_WEIGHTS[d] * 100)}%)"
+                    for d in dim_order
+                    if d in DIMENSION_DISPLAY
+                ]
+            )
+        )
+        lines.append("📌 等级标准: S(≥90) | A(≥80) | B(≥70) | C(≥60) | D(<60)")
+        lines.append("")
+
+        return lines
+
+    @classmethod
+    def _format_dimension_breakdown(cls, results, names, all_scores):
+        """生成各维度详细分解"""
+        lines = []
+
+        lines.append("─" * 115)
+        lines.append("                              📊 DIMENSION BREAKDOWN")
+        lines.append("─" * 115)
+
+        # 排序实验
+        sorted_exps = sorted(
+            names, key=lambda n: all_scores[n]["total_score"], reverse=True
+        )
+
+        dim_order = [
+            "accuracy",
+            "calibration",
+            "diversity",
+            "fairness",
+            "corruption",
+            "ood",
+            "adversarial",
+            "interpretability",
+        ]
+
+        for dim in dim_order:
+            # 检查是否有任何实验有此维度数据
+            has_data = any(dim in all_scores[n]["dimensions"] for n in names)
+            if not has_data:
+                continue
+
+            icon, cn_name, en_name = DIMENSION_DISPLAY.get(dim, ("", dim, dim))
+            weight = DIMENSION_WEIGHTS.get(dim, 0)
+
+            lines.append(f"\n{icon} {en_name} (Weight: {int(weight * 100)}%)")
+            lines.append("-" * 80)
+
+            # 收集所有该维度的指标
+            all_metrics = set()
+            for n in names:
+                if dim in all_scores[n]["dimensions"]:
+                    all_metrics.update(
+                        all_scores[n]["dimensions"][dim]["metrics"].keys()
+                    )
+            all_metrics = sorted(all_metrics)[:5]  # 最多显示 5 个指标
+
+            # 表头
+            metric_headers = [f"{m[:10]:<10}" for m in all_metrics]
+            header = (
+                f"{'Experiment':<25} │ "
+                + " │ ".join(metric_headers)
+                + f" │ {'Score':>6}"
+            )
+            lines.append(header)
+            lines.append("-" * 80)
+
+            # 收集分数用于排名
+            dim_scores = [
+                (n, all_scores[n]["dimensions"].get(dim, {}).get("score", 0))
+                for n in sorted_exps
+            ]
+            dim_scores_values = [s for _, s in dim_scores]
+
+            for rank, name in enumerate(sorted_exps):
+                if dim not in all_scores[name]["dimensions"]:
+                    continue
+
+                dim_data = all_scores[name]["dimensions"][dim]
+                medal_str = ""
+                if len(dim_scores_values) > 1:
+                    sorted_scores = sorted(dim_scores_values, reverse=True)
+                    if dim_data["score"] == sorted_scores[0]:
+                        medal_str = "🥇"
+                    elif (
+                        len(sorted_scores) > 1 and dim_data["score"] == sorted_scores[1]
+                    ):
+                        medal_str = "🥈"
+                    elif (
+                        len(sorted_scores) > 2 and dim_data["score"] == sorted_scores[2]
+                    ):
+                        medal_str = "🥉"
+
+                display_name = name[:22] if len(name) > 22 else name
+
+                metric_vals = []
+                for m in all_metrics:
+                    val = dim_data["metrics"].get(m, None)
+                    if val is not None:
+                        metric_vals.append(f"{val:<10.1f}")
+                    else:
+                        metric_vals.append(f"{'N/A':<10}")
+
+                row = (
+                    f"{display_name:<25} │ "
+                    + " │ ".join(metric_vals)
+                    + f" │ {dim_data['score']:>5.1f} {medal_str}"
+                )
+                lines.append(row)
+
+            lines.append("-" * 80)
+
+        return lines
 
     @classmethod
     def _format_perf_table(cls, results, names):
         """核心性能对比表 - 带排名标记"""
         t = [
             "\n🎯 Performance Metrics",
-            "-" * 115,
-            f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10} | {'Time':<12}",
-            "-" * 115,
+            "-" * 100,
+            f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10}",
+            "-" * 100,
         ]
 
         # 收集所有指标值用于排名
@@ -177,7 +412,6 @@ class ReportGenerator:
 
         for n in names:
             m = results[n].get("standard_metrics", {})
-            tm = format_duration(results[n].get("training_time_seconds", 0))
 
             # 获取每个指标的排名标记
             ens_mark = cls._get_rank_marker(m.get("ensemble_acc", 0), ens_accs, True)
@@ -197,9 +431,9 @@ class ReportGenerator:
                 f"{m.get('avg_individual_acc', 0):<6.2f}{avg_mark:<4} | "
                 f"{m.get('oracle_acc', 0):<6.2f}{ora_mark:<4} | "
                 f"{m.get('ece', 0):<6.4f}{ece_mark:<4} | "
-                f"{m.get('nll', 0):<6.4f}{nll_mark:<4} | {tm:<12}"
+                f"{m.get('nll', 0):<6.4f}{nll_mark:<4}"
             )
-        t.append("-" * 115)
+        t.append("-" * 100)
         return t
 
     @classmethod
@@ -484,7 +718,11 @@ class ReportGenerator:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         for idx, ckpt_path in enumerate(checkpoint_paths, 1):
-            get_logger().info(f"\n[{idx}/{len(checkpoint_paths)}] Loading: {ckpt_path}")
+            progress = f"[{idx:>2}/{len(checkpoint_paths)}]"
+            get_logger().info(f"\n{'═' * 70}")
+            get_logger().info(
+                f"{progress} 📦 Loading: {Path(ckpt_path).parent.parent.name}"
+            )
 
             # 加载模型
             ctx = CheckpointLoader.load(ckpt_path, cfg)
@@ -500,13 +738,11 @@ class ReportGenerator:
                 test_loader=test_loader,
                 cfg=cfg,
                 device=device,
-                training_time=ctx["training_time"],
                 corruption_dataset=corruption_dataset,
                 ood_dataset=ood_dataset,
                 run_gradcam=run_gradcam,
                 run_adversarial=run_adversarial,
             )
-            result["train_config"] = ctx["config"]
             results[exp_name] = result
 
         # 模型距离计算
