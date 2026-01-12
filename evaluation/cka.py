@@ -60,33 +60,18 @@ def compute_ensemble_cka(all_features: torch.Tensor) -> Dict[str, float]:
 
     Returns:
         包含 CKA 统计信息的字典:
-        - avg_cka: 平均 CKA 相似度
-        - min_cka: 最小 CKA 相似度
-        - max_cka: 最大 CKA 相似度
-        - cka_diversity: CKA 多样性 = 1 - avg_cka (越高表示越多样)
+        - avg_cka: 平均 CKA 相似度 (上三角平均值)
     """
     num_models = all_features.shape[0]
     if num_models < 2:
-        return {
-            "avg_cka": 1.0,
-            "min_cka": 1.0,
-            "max_cka": 1.0,
-            "cka_diversity": 0.0,
-        }
+        return {"avg_cka": 1.0}
 
     cka_values = []
     for i in range(num_models):
         for j in range(i + 1, num_models):
-            # 使用隐藏层特征作为表示
-            X = all_features[i]  # [num_samples, feature_dim]
+            X = all_features[i]
             Y = all_features[j]
             cka = _linear_cka(X, Y)
             cka_values.append(cka)
 
-    avg_cka = np.mean(cka_values)
-    return {
-        "avg_cka": avg_cka,
-        "min_cka": np.min(cka_values),
-        "max_cka": np.max(cka_values),
-        "cka_diversity": 1.0 - avg_cka,  # 多样性 = 1 - 相似度
-    }
+    return {"avg_cka": np.mean(cka_values)}

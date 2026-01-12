@@ -27,7 +27,6 @@ from .landscape import ModelDistanceCalculator
 from .metrics import MetricsCalculator
 from .ood import evaluate_ood
 from .saver import ResultsSaver
-from .scoring import DIMENSION_DISPLAY, DIMENSION_WEIGHTS, ScoreCalculator
 from .strategies import get_ensemble_fn
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -41,20 +40,6 @@ class ReportGenerator:
     主入口:
         ReportGenerator.evaluate_checkpoints(checkpoint_paths=[...], ...)
     """
-
-    @staticmethod
-    def _get_rank_marker(
-        value: float, all_values: List[float], higher_is_better: bool
-    ) -> str:
-        """获取排名标记 (仅多实验时显示)"""
-        if len(all_values) <= 1:
-            return ""
-        sorted_values = sorted(all_values, reverse=higher_is_better)
-        if value == sorted_values[0]:
-            return " 🥇"
-        elif value == sorted_values[1]:
-            return " 🥈"
-        return ""
 
     @staticmethod
     def _evaluate_models(
@@ -132,503 +117,177 @@ class ReportGenerator:
             )
         return a
 
+    @staticmethod
+    def _get_rank_marker(
+        value: float, all_values: List[float], higher_is_better: bool
+    ) -> str:
+        """获取排名标记 🥇🥈🥉"""
+        if len(all_values) <= 1:
+            return ""
+        sorted_values = sorted(all_values, reverse=higher_is_better)
+        if value == sorted_values[0]:
+            return "🥇"
+        elif len(sorted_values) > 1 and value == sorted_values[1]:
+            return "🥈"
+        elif len(sorted_values) > 2 and value == sorted_values[2]:
+            return "🥉"
+        return ""
+
+    @classmethod
+    def _format_val(
+        cls,
+        value: float,
+        all_vals: List[float],
+        higher_is_better: bool,
+        fmt: str = ".4f",
+    ) -> str:
+        """格式化数值并添加排名标记"""
+        mark = cls._get_rank_marker(value, all_vals, higher_is_better)
+        return f"{value:{fmt}}{mark}"
+
     @classmethod
     def _generate_report(cls, results: Dict[str, Any]) -> str:
-        """生成增强版文本报告（含评分系统）"""
+        """生成文本报告 - 按9个维度组织，带排名标记和箭头指示"""
         lines = []
         exps = list(results.keys())
 
-        # 0. 计算所有实验分数
-        all_scores = {
-            name: ScoreCalculator.calculate_all_scores(r) for name, r in results.items()
-        }
+        # 辅助函数：获取指标值列表
+        def get_std_vals(key):
+            return [results[n].get("standard_metrics", {}).get(key, 0) for n in exps]
 
-        # 1. 综合评分卡 (NEW)
-        lines.extend(cls._format_scorecard(results, exps, all_scores))
-
-        # 2. 各维度详细分解 (NEW)
-        lines.extend(cls._format_dimension_breakdown(results, exps, all_scores))
-
-        # 3. 分隔线
-        lines.append("\n" + "=" * 115)
-        lines.append("📋 DETAILED METRICS")
-        lines.append("=" * 115)
-
-        # 4. 原有核心性能对比表 (保留)
-        lines.extend(cls._format_perf_table(results, exps))
-
-        # 5. 多样性/公平性/CAM 表格 (保留)
-        lines.extend(cls._format_diversity_table(results, exps))
-
-        # 6. CKA 详情 + EOD/Bottom-K (保留)
-        lines.extend(cls._format_additional_metrics(results, exps))
-
-        # 7. 鲁棒性专门板块 (保留)
-        lines.extend(cls._format_robustness_sections(results, exps))
-
-        return "\n".join(lines)
-
-    @classmethod
-    def _format_scorecard(cls, results, names, all_scores):
-        """生成综合评分卡"""
-        lines = []
-
-        # Header
-        lines.append("═" * 115)
-        lines.append("                              🏆 ENSEMBLE EVALUATION SCORECARD")
-        lines.append("═" * 115)
-        lines.append("")
-
-        # 排序实验
-        sorted_exps = sorted(
-            names, key=lambda n: all_scores[n]["total_score"], reverse=True
-        )
-
-        # 表头 - 动态构建维度列
-        dim_order = [
-            "accuracy",
-            "calibration",
-            "diversity",
-            "fairness",
-            "corruption",
-            "ood",
-            "adversarial",
-            "interpretability",
-        ]
-        dim_headers = []
-        for dim in dim_order:
-            if dim in DIMENSION_DISPLAY:
-                icon, _, short = DIMENSION_DISPLAY[dim]
-                dim_headers.append(f"{short[:6]:^6}")
-
-        header = (
-            f"│ {'Experiment':<22} │ {'Score':^6} │ {'Grade':^5} │ "
-            + " │ ".join(dim_headers)
-            + " │"
-        )
-        sep_line = (
-            "├"
-            + "─" * 24
-            + "┼"
-            + "─" * 8
-            + "┼"
-            + "─" * 7
-            + "┼"
-            + ("─" * 8 + "┼") * len(dim_headers)
-        )
-        sep_line = sep_line[:-1] + "┤"
-
-        lines.append(
-            "┌"
-            + "─" * 24
-            + "┬"
-            + "─" * 8
-            + "┬"
-            + "─" * 7
-            + "┬"
-            + ("─" * 8 + "┬") * len(dim_headers)
-        )
-        lines[-1] = lines[-1][:-1] + "┐"
-        lines.append(header)
-        lines.append(sep_line)
-
-        # 数据行
-        for rank, name in enumerate(sorted_exps):
-            score_data = all_scores[name]
-            medal = ScoreCalculator.get_medal(rank, len(sorted_exps))
-
-            # 截断名称
-            display_name = name[:18] if len(name) > 18 else name
-            if medal:
-                display_name = f"{medal} {display_name}"
-
-            # 维度分数
-            dim_scores = []
-            for dim in dim_order:
-                if dim in score_data["dimensions"]:
-                    dim_score = score_data["dimensions"][dim]["score"]
-                    dim_scores.append(f"{dim_score:^6.0f}")
-                else:
-                    dim_scores.append(f"{'N/A':^6}")
-
-            row = (
-                f"│ {display_name:<22} │ {score_data['total_score']:^6.1f} │ {score_data['grade']:^5} │ "
-                + " │ ".join(dim_scores)
-                + " │"
-            )
-            lines.append(row)
-
-        lines.append(
-            "└"
-            + "─" * 24
-            + "┴"
-            + "─" * 8
-            + "┴"
-            + "─" * 7
-            + "┴"
-            + ("─" * 8 + "┴") * len(dim_headers)
-        )
-        lines[-1] = lines[-1][:-1] + "┘"
-        lines.append("")
-
-        # 图例
-        lines.append(
-            "📌 维度权重: "
-            + " | ".join(
-                [
-                    f"{DIMENSION_DISPLAY[d][0]}{DIMENSION_DISPLAY[d][2]}({int(DIMENSION_WEIGHTS[d] * 100)}%)"
-                    for d in dim_order
-                    if d in DIMENSION_DISPLAY
-                ]
-            )
-        )
-        lines.append("📌 等级标准: S(≥90) | A(≥80) | B(≥70) | C(≥60) | D(<60)")
-        lines.append("")
-
-        return lines
-
-    @classmethod
-    def _format_dimension_breakdown(cls, results, names, all_scores):
-        """生成各维度详细分解"""
-        lines = []
-
-        lines.append("─" * 115)
-        lines.append("                              📊 DIMENSION BREAKDOWN")
-        lines.append("─" * 115)
-
-        # 排序实验
-        sorted_exps = sorted(
-            names, key=lambda n: all_scores[n]["total_score"], reverse=True
-        )
-
-        dim_order = [
-            "accuracy",
-            "calibration",
-            "diversity",
-            "fairness",
-            "corruption",
-            "ood",
-            "adversarial",
-            "interpretability",
-        ]
-
-        for dim in dim_order:
-            # 检查是否有任何实验有此维度数据
-            has_data = any(dim in all_scores[n]["dimensions"] for n in names)
-            if not has_data:
-                continue
-
-            icon, cn_name, en_name = DIMENSION_DISPLAY.get(dim, ("", dim, dim))
-            weight = DIMENSION_WEIGHTS.get(dim, 0)
-
-            lines.append(f"\n{icon} {en_name} (Weight: {int(weight * 100)}%)")
-            lines.append("-" * 80)
-
-            # 收集所有该维度的指标
-            all_metrics = set()
-            for n in names:
-                if dim in all_scores[n]["dimensions"]:
-                    all_metrics.update(
-                        all_scores[n]["dimensions"][dim]["metrics"].keys()
-                    )
-            all_metrics = sorted(all_metrics)[:5]  # 最多显示 5 个指标
-
-            # 表头
-            metric_headers = [f"{m[:10]:<10}" for m in all_metrics]
-            header = (
-                f"{'Experiment':<25} │ "
-                + " │ ".join(metric_headers)
-                + f" │ {'Score':>6}"
-            )
-            lines.append(header)
-            lines.append("-" * 80)
-
-            # 收集分数用于排名
-            dim_scores = [
-                (n, all_scores[n]["dimensions"].get(dim, {}).get("score", 0))
-                for n in sorted_exps
+        def get_corr_vals(key):
+            return [
+                results[n].get("corruption_results", {}).get(key, 0)
+                if results[n].get("corruption_results")
+                else 0
+                for n in exps
             ]
-            dim_scores_values = [s for _, s in dim_scores]
 
-            for rank, name in enumerate(sorted_exps):
-                if dim not in all_scores[name]["dimensions"]:
-                    continue
+        def get_ood_vals(key):
+            return [
+                results[n].get("ood_results", {}).get(key, 0)
+                if results[n].get("ood_results")
+                else 0
+                for n in exps
+            ]
 
-                dim_data = all_scores[name]["dimensions"][dim]
-                medal_str = ""
-                if len(dim_scores_values) > 1:
-                    sorted_scores = sorted(dim_scores_values, reverse=True)
-                    if dim_data["score"] == sorted_scores[0]:
-                        medal_str = "🥇"
-                    elif (
-                        len(sorted_scores) > 1 and dim_data["score"] == sorted_scores[1]
-                    ):
-                        medal_str = "🥈"
-                    elif (
-                        len(sorted_scores) > 2 and dim_data["score"] == sorted_scores[2]
-                    ):
-                        medal_str = "🥉"
-
-                display_name = name[:22] if len(name) > 22 else name
-
-                metric_vals = []
-                for m in all_metrics:
-                    val = dim_data["metrics"].get(m, None)
-                    if val is not None:
-                        metric_vals.append(f"{val:<10.1f}")
-                    else:
-                        metric_vals.append(f"{'N/A':<10}")
-
-                row = (
-                    f"{display_name:<25} │ "
-                    + " │ ".join(metric_vals)
-                    + f" │ {dim_data['score']:>5.1f} {medal_str}"
-                )
-                lines.append(row)
-
-            lines.append("-" * 80)
-
-        return lines
-
-    @classmethod
-    def _format_perf_table(cls, results, names):
-        """核心性能对比表 - 带排名标记"""
-        t = [
-            "\n🎯 Performance Metrics",
-            "-" * 100,
-            f"{'Experiment':<25} | {'EnsAcc↑':<10} | {'AvgInd↑':<10} | {'Oracle↑':<10} | {'ECE↓':<10} | {'NLL↓':<10}",
-            "-" * 100,
-        ]
-
-        # 收集所有指标值用于排名
-        def get_vals(key):
-            return [results[n].get("standard_metrics", {}).get(key, 0) for n in names]
-
-        ens_accs = get_vals("ensemble_acc")
-        avg_accs = get_vals("avg_individual_acc")
-        oracle_accs = get_vals("oracle_acc")
-        eces = get_vals("ece")
-        nlls = get_vals("nll")
-
-        for n in names:
-            m = results[n].get("standard_metrics", {})
-
-            # 获取每个指标的排名标记
-            ens_mark = cls._get_rank_marker(m.get("ensemble_acc", 0), ens_accs, True)
-            avg_mark = cls._get_rank_marker(
-                m.get("avg_individual_acc", 0), avg_accs, True
-            )
-            ora_mark = cls._get_rank_marker(m.get("oracle_acc", 0), oracle_accs, True)
-            ece_mark = cls._get_rank_marker(
-                m.get("ece", 0), eces, False
-            )  # ↓ lower is better
-            nll_mark = cls._get_rank_marker(
-                m.get("nll", 0), nlls, False
-            )  # ↓ lower is better
-
-            t.append(
-                f"{n:<25} | {m.get('ensemble_acc', 0):<6.2f}{ens_mark:<4} | "
-                f"{m.get('avg_individual_acc', 0):<6.2f}{avg_mark:<4} | "
-                f"{m.get('oracle_acc', 0):<6.2f}{ora_mark:<4} | "
-                f"{m.get('ece', 0):<6.4f}{ece_mark:<4} | "
-                f"{m.get('nll', 0):<6.4f}{nll_mark:<4}"
-            )
-        t.append("-" * 100)
-        return t
-
-    @classmethod
-    def _format_diversity_table(cls, results, names):
-        """生成 Div/Fair/CAM 横向表格 - 带排名标记"""
-        has_cam = any(results[n].get("gradcam_metrics") for n in names)
-
-        header = f"{'Experiment':<25} | {'Dis↑':<10} | {'CKA_Div↑':<10} | {'BalAcc↑':<10} | {'Gini↓':<10} | {'Fair↑':<10}"
-        if has_cam:
-            header += f" | {'Entropy':<8} | {'Sim↓':<8} | {'Overlap↓':<8}"
-
-        t = [
-            "\n🔀 Diversity / Fairness / CAM Metrics",
-            "-" * (115 if not has_cam else 145),
-            header,
-            "-" * (115 if not has_cam else 145),
-        ]
-
-        # 收集所有指标值
-        def get_vals(key):
-            return [results[n].get("standard_metrics", {}).get(key, 0) for n in names]
+        def get_adv_vals(key):
+            return [
+                results[n].get("adversarial_results", {}).get(key, 0)
+                if results[n].get("adversarial_results")
+                else 0
+                for n in exps
+            ]
 
         def get_cam_vals(key):
-            return [results[n].get("gradcam_metrics", {}).get(key, 0) for n in names]
+            return [
+                results[n].get("gradcam_metrics", {}).get(key, 0)
+                if results[n].get("gradcam_metrics")
+                else 0
+                for n in exps
+            ]
 
-        dis_vals = get_vals("disagreement")
-        cka_div_vals = get_vals("cka_diversity")
-        bal_vals = get_vals("balanced_acc")
-        gini_vals = get_vals("acc_gini_coef")
-        fair_vals = get_vals("fairness_score")
-        sim_vals = get_cam_vals("avg_cam_similarity") if has_cam else []
-        overlap_vals = get_cam_vals("avg_cam_overlap") if has_cam else []
+        def get_dist_vals(key):
+            return [results[n].get(key, 0) for n in exps]
 
-        for n in names:
-            m = results[n].get("standard_metrics", {})
-            g = results[n].get("gradcam_metrics", {})
+        lines.append("=" * 120)
+        lines.append("📋 ENSEMBLE EVALUATION REPORT")
+        lines.append("=" * 120)
 
-            # 获取排名标记
-            dis_mark = cls._get_rank_marker(m.get("disagreement", 0), dis_vals, True)
-            cka_mark = cls._get_rank_marker(
-                m.get("cka_diversity", 0), cka_div_vals, True
-            )
-            bal_mark = cls._get_rank_marker(m.get("balanced_acc", 0), bal_vals, True)
-            gini_mark = cls._get_rank_marker(
-                m.get("acc_gini_coef", 0), gini_vals, False
-            )  # ↓
-            fair_mark = cls._get_rank_marker(
-                m.get("fairness_score", 0), fair_vals, True
-            )
-
-            row = (
-                f"{n:<25} | {m.get('disagreement', 0):<6.2f}{dis_mark:<4} | "
-                f"{m.get('cka_diversity', 0):<6.4f}{cka_mark:<4} | "
-                f"{m.get('balanced_acc', 0):<6.2f}{bal_mark:<4} | "
-                f"{m.get('acc_gini_coef', 0):<6.4f}{gini_mark:<4} | "
-                f"{m.get('fairness_score', 0):<6.2f}{fair_mark:<4}"
-            )
-            if has_cam:
-                sim_mark = cls._get_rank_marker(
-                    g.get("avg_cam_similarity", 0), sim_vals, False
-                )
-                ovl_mark = cls._get_rank_marker(
-                    g.get("avg_cam_overlap", 0), overlap_vals, False
-                )
-                row += (
-                    f" | {g.get('avg_cam_entropy', 0):<8.4f} | "
-                    f"{g.get('avg_cam_similarity', 0):<4.4f}{sim_mark:<4} | "
-                    f"{g.get('avg_cam_overlap', 0):<4.4f}{ovl_mark:<4}"
-                )
-            t.append(row)
-
-        t.append("-" * (115 if not has_cam else 145))
-        return t
-
-    @classmethod
-    def _format_additional_metrics(cls, results, names):
-        """CKA 详情 + EOD/Bottom-K 表格"""
-        t = []
-
-        # ===== CKA 详情 =====
-        t.append("\n📊 CKA Similarity Details")
-        t.append("-" * 80)
-        t.append(
-            f"{'Experiment':<25} | {'Avg_CKA↓':<12} | {'Min_CKA':<12} | {'Max_CKA':<12} | {'CKA_Div↑':<12}"
+        # 1. 准确率 (↑ 高好)
+        lines.append("\n🎯 准确率 (Accuracy)")
+        lines.append("-" * 100)
+        lines.append(
+            f"{'Experiment':<25} | {'ensemble_acc↑':<16} | {'avg_ind_acc↑':<16} | {'oracle_acc↑':<16}"
         )
-        t.append("-" * 80)
-
-        for n in names:
+        lines.append("-" * 100)
+        ens_vals = get_std_vals("ensemble_acc")
+        avg_vals = get_std_vals("avg_individual_acc")
+        ora_vals = get_std_vals("oracle_acc")
+        for n in exps:
             m = results[n].get("standard_metrics", {})
-            t.append(
-                f"{n:<25} | {m.get('avg_cka', 0):<12.4f} | "
-                f"{m.get('min_cka', 0):<12.4f} | {m.get('max_cka', 0):<12.4f} | "
-                f"{m.get('cka_diversity', 0):<12.4f}"
+            lines.append(
+                f"{n:<25} | {cls._format_val(m.get('ensemble_acc', 0), ens_vals, True):<16} | "
+                f"{cls._format_val(m.get('avg_individual_acc', 0), avg_vals, True):<16} | "
+                f"{cls._format_val(m.get('oracle_acc', 0), ora_vals, True):<16}"
             )
-        t.append("-" * 80)
 
-        # ===== EOD + Bottom-K =====
-        t.append("\n⚖️ Fairness Details (EOD + Bottom-K)")
-        t.append("-" * 80)
-        t.append(
-            f"{'Experiment':<25} | {'EOD↓':<10} | {'Bottom3↑':<12} | {'Bottom5↑':<12}"
-        )
-        t.append("-" * 80)
-
-        for n in names:
+        # 2. 校准性 (↓ 低好)
+        lines.append("\n📏 校准性 (Calibration)")
+        lines.append("-" * 70)
+        lines.append(f"{'Experiment':<25} | {'ece↓':<16} | {'nll↓':<16}")
+        lines.append("-" * 70)
+        ece_vals = get_std_vals("ece")
+        nll_vals = get_std_vals("nll")
+        for n in exps:
             m = results[n].get("standard_metrics", {})
-            t.append(
-                f"{n:<25} | {m.get('eod', 0):<10.2f} | "
-                f"{m.get('bottom_3_class_acc', 0):<12.2f} | "
-                f"{m.get('bottom_5_class_acc', 0):<12.2f}"
+            lines.append(
+                f"{n:<25} | {cls._format_val(m.get('ece', 0), ece_vals, False, '.6f'):<16} | "
+                f"{cls._format_val(m.get('nll', 0), nll_vals, False, '.6f'):<16}"
             )
-        t.append("-" * 80)
 
-        return t
-
-    @classmethod
-    def _format_robustness_sections(cls, results, names):
-        """鲁棒性综合报告 - 包含 OOD/Adversarial/Corruption 全部指标"""
-        s = []
-
-        # ===== 1. 对抗鲁棒性 =====
-        s.append("\n⚔️ Adversarial Robustness")
-        s.append("-" * 100)
-        s.append(
-            f"{'Experiment':<25} | {'Clean↑':<10} | {'FGSM↑':<10} | {'PGD↑':<10} | {'ε':<8} | {'Steps':<6}"
+        # 3. 多样性 (disagreement↑高好, js_div↑高好, avg_cka↓低好表示更多样)
+        lines.append("\n🔀 多样性 (Diversity)")
+        lines.append("-" * 90)
+        lines.append(
+            f"{'Experiment':<25} | {'disagreement↑':<16} | {'js_divergence↑':<16} | {'avg_cka↓':<16}"
         )
-        s.append("-" * 100)
-
-        for n in names:
-            adv = results[n].get("adversarial_results") or {}
-            if not adv:
-                s.append(
-                    f"{n:<25} | {'N/A':<10} | {'N/A':<10} | {'N/A':<10} | {'N/A':<8} | {'N/A':<6}"
-                )
-            elif "pgd_acc" in adv:
-                # 单 ε 模式
-                s.append(
-                    f"{n:<25} | {adv.get('clean_acc', 0):<10.2f} | "
-                    f"{adv.get('fgsm_acc', 0):<10.2f} | {adv.get('pgd_acc', 0):<10.2f} | "
-                    f"{adv.get('eps_255', 0):<8.1f} | {adv.get('pgd_steps', 0):<6}"
-                )
-            else:
-                # 多 ε 模式: 显示每个 ε 的结果
-                for eps_key, eps_data in adv.items():
-                    s.append(
-                        f"{n:<25} | {eps_data.get('clean_acc', 0):<10.2f} | "
-                        f"{eps_data.get('fgsm_acc', 0):<10.2f} | {eps_data.get('pgd_acc', 0):<10.2f} | "
-                        f"{eps_data.get('eps_255', 0):<8.1f} | {eps_data.get('pgd_steps', 0):<6}"
-                    )
-        s.append("-" * 100)
-
-        # ===== 2. OOD 检测 =====
-        has_ood = any(results[n].get("ood_results") for n in names)
-        if has_ood:
-            s.append("\n🔮 OOD Detection")
-            s.append("-" * 100)
-            s.append(
-                f"{'Experiment':<25} | {'AUROC_MSP↑':<12} | {'AUROC_Ent↑':<12} | {'FPR95_MSP↓':<12} | {'FPR95_Ent↓':<12}"
+        lines.append("-" * 90)
+        dis_vals = get_std_vals("disagreement")
+        js_vals = get_std_vals("js_divergence")
+        cka_vals = get_std_vals("avg_cka")
+        for n in exps:
+            m = results[n].get("standard_metrics", {})
+            lines.append(
+                f"{n:<25} | {cls._format_val(m.get('disagreement', 0), dis_vals, True):<16} | "
+                f"{cls._format_val(m.get('js_divergence', 0), js_vals, True):<16} | "
+                f"{cls._format_val(m.get('avg_cka', 0), cka_vals, False):<16}"
             )
-            s.append("-" * 100)
 
-            for n in names:
-                ood = results[n].get("ood_results") or {}
-                if ood:
-                    s.append(
-                        f"{n:<25} | {ood.get('ood_auroc_msp', 0):<12.2f} | "
-                        f"{ood.get('ood_auroc_entropy', 0):<12.2f} | "
-                        f"{ood.get('ood_fpr95_msp', 0):<12.2f} | "
-                        f"{ood.get('ood_fpr95_entropy', 0):<12.2f}"
-                    )
-                else:
-                    s.append(
-                        f"{n:<25} | {'N/A':<12} | {'N/A':<12} | {'N/A':<12} | {'N/A':<12}"
-                    )
-            s.append("-" * 100)
+        # 4. 公平性
+        lines.append("\n⚖️ 公平性 (Fairness)")
+        lines.append("-" * 140)
+        lines.append(
+            f"{'Experiment':<25} | {'balanced_acc↑':<14} | {'gini_coef↓':<14} | "
+            f"{'fair_score↑':<14} | {'eod↓':<12} | {'bottom_3↑':<12} | {'bottom_5↑':<12}"
+        )
+        lines.append("-" * 140)
+        bal_vals = get_std_vals("balanced_acc")
+        gini_vals = get_std_vals("acc_gini_coef")
+        fair_vals = get_std_vals("fairness_score")
+        eod_vals = get_std_vals("eod")
+        b3_vals = get_std_vals("bottom_3_class_acc")
+        b5_vals = get_std_vals("bottom_5_class_acc")
+        for n in exps:
+            m = results[n].get("standard_metrics", {})
+            lines.append(
+                f"{n:<25} | {cls._format_val(m.get('balanced_acc', 0), bal_vals, True):<14} | "
+                f"{cls._format_val(m.get('acc_gini_coef', 0), gini_vals, False):<14} | "
+                f"{cls._format_val(m.get('fairness_score', 0), fair_vals, True):<14} | "
+                f"{cls._format_val(m.get('eod', 0), eod_vals, False):<12} | "
+                f"{cls._format_val(m.get('bottom_3_class_acc', 0), b3_vals, True):<12} | "
+                f"{cls._format_val(m.get('bottom_5_class_acc', 0), b5_vals, True):<12}"
+            )
 
-        # ===== 3. Corruption 鲁棒性 =====
-        has_corr = any(results[n].get("corruption_results") for n in names)
+        # 5. Corruption 鲁棒性 (↑ 高好)
+        has_corr = any(results[n].get("corruption_results") for n in exps)
         if has_corr:
-            s.append("\n🌪️ Corruption Robustness")
-            s.append("-" * 100)
-
-            # 3.1 总体平均
-            s.append(f"{'Experiment':<25} | {'Overall↑':<10}")
-            s.append("-" * 50)
-            for n in names:
+            lines.append("\n🌪️ Corruption鲁棒性 (Corruption Robustness)")
+            lines.append("-" * 80)
+            lines.append(f"{'Experiment':<25} | {'overall_avg↑':<16}")
+            lines.append("-" * 50)
+            overall_vals = get_corr_vals("overall_avg")
+            for n in exps:
                 corr = results[n].get("corruption_results") or {}
-                s.append(f"{n:<25} | {corr.get('overall_avg', 0):<10.2f}")
-            s.append("")
+                lines.append(
+                    f"{n:<25} | {cls._format_val(corr.get('overall_avg', 0), overall_vals, True):<16}"
+                )
 
-            # 3.2 按严重程度展示
+            # by_severity
             first_corr = next(
                 (
                     results[n].get("corruption_results")
-                    for n in names
+                    for n in exps
                     if results[n].get("corruption_results")
                 ),
                 {},
@@ -636,40 +295,113 @@ class ReportGenerator:
             severities = sorted(
                 list((first_corr.get("by_severity") or {}).keys()), key=lambda x: int(x)
             )
-
             if severities:
-                s.append(
-                    f"{'Experiment':<25} | "
-                    + " | ".join([f"Sev {str(sev):<4}" for sev in severities])
+                lines.append(
+                    f"\nBy Severity: {' | '.join([f'Sev_{s}↑' for s in severities])}"
                 )
-                s.append("-" * (28 + 10 * len(severities)))
-                for n in names:
+                for n in exps:
                     corr = results[n].get("corruption_results") or {}
                     by_sev = corr.get("by_severity") or {}
-                    sev_vals = " | ".join(
-                        [f"{by_sev.get(sev, 0):<8.2f}" for sev in severities]
+                    lines.append(
+                        f"{n:<25} | "
+                        + " | ".join([f"{by_sev.get(s, 0):.4f}" for s in severities])
                     )
-                    s.append(f"{n:<25} | {sev_vals}")
-            s.append("")
 
-            # 3.3 按类别展示
+            # by_category
             categories = list((first_corr.get("by_category") or {}).keys())
             if categories:
-                s.append(
-                    f"{'Experiment':<25} | "
-                    + " | ".join([f"{c:<10}" for c in categories])
+                lines.append(
+                    f"\nBy Category: {' | '.join([f'{c}↑' for c in categories])}"
                 )
-                s.append("-" * (30 + 13 * len(categories)))
-                for n in names:
+                for n in exps:
                     corr = results[n].get("corruption_results") or {}
                     by_cat = corr.get("by_category") or {}
-                    cat_vals = " | ".join(
-                        [f"{by_cat.get(c, 0):<10.2f}" for c in categories]
+                    lines.append(
+                        f"{n:<25} | "
+                        + " | ".join([f"{by_cat.get(c, 0):.4f}" for c in categories])
                     )
-                    s.append(f"{n:<25} | {cat_vals}")
-            s.append("-" * 100)
 
-        return s
+        # 6. OOD 鲁棒性 (AUROC↑高好, FPR95↓低好)
+        has_ood = any(results[n].get("ood_results") for n in exps)
+        if has_ood:
+            lines.append("\n🔮 OOD鲁棒性 (OOD Robustness)")
+            lines.append("-" * 120)
+            lines.append(
+                f"{'Experiment':<25} | {'auroc_msp↑':<16} | {'auroc_entropy↑':<18} | "
+                f"{'fpr95_msp↓':<16} | {'fpr95_entropy↓':<18}"
+            )
+            lines.append("-" * 120)
+            auroc_msp = get_ood_vals("ood_auroc_msp")
+            auroc_ent = get_ood_vals("ood_auroc_entropy")
+            fpr_msp = get_ood_vals("ood_fpr95_msp")
+            fpr_ent = get_ood_vals("ood_fpr95_entropy")
+            for n in exps:
+                ood = results[n].get("ood_results") or {}
+                lines.append(
+                    f"{n:<25} | {cls._format_val(ood.get('ood_auroc_msp', 0), auroc_msp, True):<16} | "
+                    f"{cls._format_val(ood.get('ood_auroc_entropy', 0), auroc_ent, True):<18} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_msp', 0), fpr_msp, False):<16} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_entropy', 0), fpr_ent, False):<18}"
+                )
+
+        # 7. Adversarial 鲁棒性 (↑ 高好)
+        has_adv = any(results[n].get("adversarial_results") for n in exps)
+        if has_adv:
+            lines.append("\n⚔️ Adversarial鲁棒性 (Adversarial Robustness)")
+            lines.append("-" * 70)
+            lines.append(f"{'Experiment':<25} | {'fgsm_acc↑':<16} | {'pgd_acc↑':<16}")
+            lines.append("-" * 70)
+            fgsm_vals = get_adv_vals("fgsm_acc")
+            pgd_vals = get_adv_vals("pgd_acc")
+            for n in exps:
+                adv = results[n].get("adversarial_results") or {}
+                lines.append(
+                    f"{n:<25} | {cls._format_val(adv.get('fgsm_acc', 0), fgsm_vals, True):<16} | "
+                    f"{cls._format_val(adv.get('pgd_acc', 0), pgd_vals, True):<16}"
+                )
+
+        # 8. GradCAM 多样性 (entropy↑高好, similarity/overlap↓低好)
+        has_cam = any(results[n].get("gradcam_metrics") for n in exps)
+        if has_cam:
+            lines.append("\n🔍 GradCAM多样性 (GradCAM Diversity)")
+            lines.append("-" * 100)
+            lines.append(
+                f"{'Experiment':<25} | {'cam_entropy↑':<16} | {'cam_similarity↓':<18} | {'cam_overlap↓':<16}"
+            )
+            lines.append("-" * 100)
+            ent_vals = get_cam_vals("avg_cam_entropy")
+            sim_vals = get_cam_vals("avg_cam_similarity")
+            ovl_vals = get_cam_vals("avg_cam_overlap")
+            for n in exps:
+                g = results[n].get("gradcam_metrics") or {}
+                lines.append(
+                    f"{n:<25} | {cls._format_val(g.get('avg_cam_entropy', 0), ent_vals, True):<16} | "
+                    f"{cls._format_val(g.get('avg_cam_similarity', 0), sim_vals, False):<18} | "
+                    f"{cls._format_val(g.get('avg_cam_overlap', 0), ovl_vals, False):<16}"
+                )
+
+        # 9. 参数空间多样性 (avg_distance↑高好表示更多样, direction_div↑高好, std↑高好)
+        has_dist = any(results[n].get("distance_matrix") is not None for n in exps)
+        if has_dist:
+            lines.append("\n📐 参数空间多样性 (Parameter Space Diversity)")
+            lines.append("-" * 100)
+            lines.append(
+                f"{'Experiment':<25} | {'avg_distance↑':<16} | {'direction_div↑':<18} | {'std_distance↑':<16}"
+            )
+            lines.append("-" * 100)
+            avg_d = get_dist_vals("avg_distance")
+            dir_d = get_dist_vals("direction_diversity")
+            std_d = get_dist_vals("std_distance")
+            for n in exps:
+                r = results[n]
+                lines.append(
+                    f"{n:<25} | {cls._format_val(r.get('avg_distance', 0), avg_d, True):<16} | "
+                    f"{cls._format_val(r.get('direction_diversity', 0), dir_d, True):<18} | "
+                    f"{cls._format_val(r.get('std_distance', 0), std_d, True):<16}"
+                )
+
+        lines.append("\n" + "=" * 120)
+        return "\n".join(lines)
 
     @classmethod
     def _save_and_print(cls, results: Dict[str, Dict], save_dir: str):
@@ -705,11 +437,6 @@ class ReportGenerator:
         适用场景: 评估已保存的模型，与训练解耦
         这是 evaluation 模块的主入口，完全独立于 training 模块。
         """
-        get_logger().info(f"\n{'=' * 80}")
-        get_logger().info(
-            f"📊 EVALUATION FROM CHECKPOINTS | Count: {len(checkpoint_paths)}"
-        )
-        get_logger().info(f"{'=' * 80}")
 
         output_dir = cfg.evaluation_dir
         ensure_dir(output_dir)
@@ -753,6 +480,32 @@ class ReportGenerator:
             for exp_name, models in all_models.items():
                 dist_matrix = distance_calc.compute(models)
                 results[exp_name]["distance_matrix"] = dist_matrix
+
+                # 计算衍生指标并保存到 results
+                n = len(dist_matrix)
+                if n > 1:
+                    import math
+
+                    distances = [
+                        dist_matrix[i][j] for i in range(n) for j in range(i + 1, n)
+                    ]
+                    count = len(distances)
+                    avg_dist = sum(distances) / count if count > 0 else 0
+                    results[exp_name]["avg_distance"] = avg_dist
+
+                    if count > 1:
+                        variance = sum((d - avg_dist) ** 2 for d in distances) / count
+                        std_dist = math.sqrt(variance)
+                    else:
+                        std_dist = 0
+                    results[exp_name]["std_distance"] = std_dist
+
+                    if avg_dist > 0:
+                        results[exp_name]["direction_diversity"] = min(
+                            std_dist / avg_dist, 1.0
+                        )
+                    else:
+                        results[exp_name]["direction_diversity"] = 0
 
         # 生成并保存文本报告
         cls._save_and_print(results, output_dir)

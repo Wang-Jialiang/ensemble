@@ -27,16 +27,14 @@ class _CloudMaskGenerator:
         width: int,
         device: torch.device,
         persistence: float,
-        octaves_large: int,
-        octaves_small: int,
+        octaves: int,
         scale_ratio: float,
     ):
         self.h = height
         self.w = width
         self.device = device
         self.persistence = persistence
-        self.octaves_large = octaves_large
-        self.octaves_small = octaves_small
+        self.octaves = octaves
         # base_scale 随图像尺寸动态调整，使用 scale_ratio 控制碎裂程度
         self.base_scale = min(height, width) * scale_ratio
 
@@ -56,8 +54,7 @@ class _CloudMaskGenerator:
     def _get_noise_map(self):
         """生成一张随机缩放的底图"""
         scale = self.base_scale * random.uniform(0.8, 1.2)
-        octaves = self.octaves_large if self.h >= 64 else self.octaves_small
-        return self._generate_perlin_noise(scale, octaves, self.persistence)
+        return self._generate_perlin_noise(scale, self.octaves, self.persistence)
 
     def _threshold_noise(self, noise, ratio):
         """执行二进制量子化"""
@@ -372,8 +369,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
         width: int,
         pool_size: int = 1024,
         persistence: float = 0.5,
-        octaves_large: int = 4,
-        octaves_small: int = 3,
+        octaves: int = 4,
         scale_ratio: float = 0.3,
         fill_value: float = 0.0,
     ):
@@ -384,8 +380,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
             width,
             device,
             persistence,
-            octaves_large,
-            octaves_small,
+            octaves,
             scale_ratio,
         )
         self._fill_value = fill_value
@@ -398,8 +393,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
             cfg.image_size,
             cfg.mask_pool_size,
             cfg.perlin_persistence,
-            cfg.perlin_octaves_large,
-            cfg.perlin_octaves_small,
+            cfg.perlin_octaves,
             cfg.perlin_scale_ratio,
             cls._compute_fill_value(cfg),
         )

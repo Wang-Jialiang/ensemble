@@ -42,8 +42,7 @@ constants:
 
   # 数据增强标准值
   perlin_persistence: 0.5           # Perlin 噪声标准持久度
-  perlin_octaves_large: 4           # Perlin octaves (图像 >= 64 时)
-  perlin_octaves_small: 3           # Perlin octaves (图像 < 64 时)
+  perlin_octaves: 4                  # Perlin 噪声 octaves 数量
 
   # 可视化
   plot_dpi: 300                     # 图表保存 DPI
@@ -77,7 +76,7 @@ base:
   scheduler: "cosine"               # 调度器: "cosine", "none"
   min_lr: 0.000001                  # 学习率调度器最小值 (cosine 衰减终点)
   weight_decay: 0.05                # 权重衰减: AdamW推荐 0.05, SGD推荐 0.0001
-  early_stopping_patience: 15       # 早停耐心值 (验证集无改善的轮数)
+  early_stopping_patience: 10       # 早停耐心值 (验证集无改善的轮数)
 
   # [增强细节调整]
   perlin_scale_ratio: 0.25          # Perlin 噪声尺度比例 (0.2 约产生 2-3 个主要遮挡块)
@@ -88,8 +87,8 @@ base:
   # [阶段训练专用] 三阶段与 Mask - 仅 StagedEnsembleTrainer 使用
   # ==========================================================================
   warmup_epochs: 10                 # Warmup 阶段轮数
-  progressive_epochs: 60            # Progressive 阶段轮数
-  finetune_epochs: 30               # Finetune 阶段轮数
+  progressive_epochs: 70            # Progressive 阶段轮数
+  finetune_epochs: 20               # Finetune 阶段轮数
   mask_pool_size: 1024              # 预生成的 Mask 池大小
   mask_start_ratio: 0.15            # Progressive 阶段起始遮罩比例
   mask_end_ratio: 0.35              # Progressive 阶段结束遮罩比例
@@ -204,17 +203,17 @@ experiments:
     augmentation_method: "none"
     use_curriculum: false
 
-  - name: "Exp10_Baseline"
-    desc: "No Augmentation (Pure Baseline)"
-    augmentation_method: "none"
-    use_curriculum: true
+  # - name: "Exp10_Baseline"
+  #   desc: "No Augmentation (Pure Baseline)"
+  #   augmentation_method: "none"
+  #   use_curriculum: true
 
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
 # ==============================================================================
 # 只需修改此时间戳，所有检查点路径自动更新
 # 路径格式: ./output/training/{training_timestamp}/{exp_name}/checkpoints/best
-training_timestamp: "20260109_225141"  # 修改这里即可
+training_timestamp: "20260112_015916"  # 修改这里即可
 
 # 实验列表 (路径由代码自动拼接)
 eval_checkpoints:

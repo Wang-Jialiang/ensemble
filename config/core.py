@@ -134,8 +134,7 @@ class Config:
     perlin_scale_ratio: float  # Perlin 噪声尺度比例 (默认 0.3)
     gridmask_d_ratio_min: float  # GridMask 网格单元最小尺寸比例 (默认 0.2)
     gridmask_d_ratio_max: float  # GridMask 网格单元最大尺寸比例 (默认 0.4)
-    perlin_octaves_large: int  # Perlin octaves (图像 >= 64 时, 默认 4)
-    perlin_octaves_small: int  # Perlin octaves (图像 < 64 时, 默认 3)
+    perlin_octaves: int  # Perlin octaves 数量 (默认 4)
 
     # ==========================================================================
     # [评估专用] 可视化参数

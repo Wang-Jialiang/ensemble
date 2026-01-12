@@ -79,7 +79,7 @@ class MetricsCalculator:
         }
 
     def _calc_diversity(self, all_logits, all_features=None):
-        """计算预测多样性: Disagreement + CKA
+        """计算预测多样性: Disagreement + JS散度 + CKA
 
         Args:
             all_logits: [num_models, num_samples, num_classes]
@@ -87,21 +87,49 @@ class MetricsCalculator:
         """
         num_m = all_logits.shape[0]
         all_preds = all_logits.argmax(2)
+        all_probs = F.softmax(
+            all_logits, dim=2
+        )  # [num_models, num_samples, num_classes]
 
-        # 1. Disagreement (硬不一致性)
+        # 1. Disagreement (硬不一致性 - 基于类别标签)
         pairs = [(i, j) for i in range(num_m) for j in range(i + 1, num_m)]
         dis_val = sum(
             (all_preds[p[0]] != all_preds[p[1]]).float().mean().item() for p in pairs
         )
 
-        # 2. CKA (表示层多样性)
+        # 2. JS 散度 (软不一致性 - 基于概率分布)
+        js_val = sum(
+            self._js_divergence(all_probs[p[0]], all_probs[p[1]]) for p in pairs
+        )
+
+        # 3. CKA (表示层多样性)
         cka_input = all_features if all_features is not None else all_logits
         cka_m = compute_ensemble_cka(cka_input)
 
         return {
             "disagreement": 100.0 * (dis_val / len(pairs) if pairs else 0.0),
+            "js_divergence": js_val / len(pairs) if pairs else 0.0,
             **cka_m,
         }
+
+    def _js_divergence(
+        self, p: torch.Tensor, q: torch.Tensor, eps: float = 1e-8
+    ) -> float:
+        """计算两个概率分布之间的 Jensen-Shannon 散度
+
+        Args:
+            p: [num_samples, num_classes] 概率分布
+            q: [num_samples, num_classes] 概率分布
+            eps: 数值稳定性常数
+
+        Returns:
+            平均 JS 散度 (范围: 0 到 ln(2) ≈ 0.693)
+        """
+        m = 0.5 * (p + q)
+        kl_pm = (p * (torch.log(p + eps) - torch.log(m + eps))).sum(dim=1)
+        kl_qm = (q * (torch.log(q + eps) - torch.log(m + eps))).sum(dim=1)
+        js = 0.5 * (kl_pm + kl_qm)
+        return js.mean().item()
 
     def _calc_fairness(self, ens_preds, targets, all_logits):
         """计算公平性指标集（精简版）"""
