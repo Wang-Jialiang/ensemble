@@ -6,12 +6,13 @@
 包含: PreloadedCIFAR10, PreloadedEuroSAT, DATASET_REGISTRY
 """
 
+from pathlib import Path
 from typing import Dict, Type
 
 import numpy as np
 import torch
 import torchvision
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tqdm import tqdm
 
 from ..utils import get_logger
 from .base import BasePreloadedDataset
@@ -52,11 +53,11 @@ class PreloadedCIFAR10(BasePreloadedDataset):
     STD = [0.2023, 0.1994, 0.2010]
     IMAGE_SIZE = 32
     NUM_CLASSES = 10
+    NUM_CHANNELS = 3
     NAME = "CIFAR-10"
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5), reraise=True)
     def _load_data(self):
-        """主加载流程 (带重试保护)"""
+        """主加载流程"""
         source_ds = self._fetch_builtin_dataset()
         self._ingest_source_data(source_ds)
         self._log_loaded()
@@ -70,7 +71,7 @@ class PreloadedCIFAR10(BasePreloadedDataset):
     def _ingest_source_data(self, source_ds):
         """将源数据集的 image/targets 转移到 Tensor 形式"""
         get_logger().info(
-            f"📦 Preloading {self.NAME} {'train' if self.train else 'test'} to RAM..."
+            f"📦 Preloading {self.NAME} {'train' if self.train else 'test'} to RAM"
         )
         # (N, H, W, 3) -> (N, 3, H, W)
         self.images = torch.from_numpy(source_ds.data).permute(0, 3, 1, 2)
@@ -81,10 +82,11 @@ class PreloadedCIFAR10(BasePreloadedDataset):
 class PreloadedEuroSAT(BasePreloadedDataset):
     """内存预加载的EuroSAT遥感数据集"""
 
-    MEAN = [0.485, 0.456, 0.406]  # ImageNet标准化
-    STD = [0.229, 0.224, 0.225]
+    MEAN = [0.3444, 0.3803, 0.4078]  # EuroSAT specific statistics
+    STD = [0.2037, 0.1366, 0.1148]
     IMAGE_SIZE = 64
     NUM_CLASSES = 10
+    NUM_CHANNELS = 3
     NAME = "EuroSAT"
     HAS_OFFICIAL_SPLIT = False  # 没有官方划分，需要手动划分
 
@@ -108,11 +110,23 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         self.seed = seed
         super().__init__(root, train)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5), reraise=True)
     def _load_data(self):
-        """主加载流程 (由于 EuroSAT 无划分，包含本地采样逻辑)"""
-        source_ds = self._fetch_builtin_dataset()
-        full_imgs, full_lbls = self._extract_samples(source_ds)
+        """主加载流程 (支持缓存加速)"""
+        cache_path = Path(self.root) / f"eurosat_cache_seed{self.seed}.npz"
+
+        if cache_path.exists():
+            # 快速加载缓存
+            get_logger().info(f"⚡ 从缓存加载 {self.NAME}: {cache_path}")
+            data = np.load(cache_path)
+            full_imgs, full_lbls = data["images"], data["targets"]
+        else:
+            # 首次加载并创建缓存
+            get_logger().info(f"📡 首次加载 {self.NAME}，将创建缓存...")
+            source_ds = self._fetch_builtin_dataset()
+            full_imgs, full_lbls = self._extract_samples(source_ds)
+            np.savez(cache_path, images=full_imgs, targets=full_lbls)
+            get_logger().info(f"💾 缓存已保存: {cache_path}")
+
         self._apply_train_test_split(full_imgs, full_lbls)
         self._log_loaded()
 
@@ -121,10 +135,10 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         return torchvision.datasets.EuroSAT(root=self.root, download=False)
 
     def _extract_samples(self, source_ds):
-        """解析 PIL Image 序列为 NumPy 阵列"""
+        """解析 PIL Image 序列为 NumPy 阵列 (带进度条)"""
         get_logger().info(f"📡 Parsing {self.NAME} samples...")
         imgs, lbls = [], []
-        for img, target in source_ds:
+        for img, target in tqdm(source_ds, desc=f"Loading {self.NAME}", unit="img"):
             imgs.append(np.array(img))
             lbls.append(target)
         return np.stack(imgs, axis=0), np.array(lbls)

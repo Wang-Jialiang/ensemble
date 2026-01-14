@@ -54,7 +54,7 @@ class _CloudMaskGenerator:
     def _get_noise_map(self):
         """生成一张随机缩放的底图"""
         scale = self.base_scale * random.uniform(0.8, 1.2)
-        return self._generate_perlin_noise(scale, self.octaves, self.persistence)
+        return self._generate_perlin_noise(scale)
 
     def _threshold_noise(self, noise, ratio):
         """执行二进制量子化"""
@@ -62,15 +62,13 @@ class _CloudMaskGenerator:
         mask = (noise < threshold).float()
         return mask.view(1, 1, self.h, self.w)  # [1, 1, H, W]
 
-    def _generate_perlin_noise(
-        self, scale: float, octaves: int = 4, persistence: float = 0.5
-    ) -> torch.Tensor:
+    def _generate_perlin_noise(self, scale: float) -> torch.Tensor:
         """生成Perlin噪声"""
         noise = torch.zeros(self.h, self.w, device=self.device)
         amplitude = 1.0
         max_val = 0.0
 
-        for i in range(octaves):
+        for i in range(self.octaves):
             freq = 2**i
             grid_h = max(2, int(self.h / (scale / freq)))
             grid_w = max(2, int(self.w / (scale / freq)))
@@ -141,16 +139,35 @@ class AugmentationMethod:
     所有增强方法支持预计算 mask 池，训练时从池中随机选择。
     """
 
-    def __init__(self, device: torch.device, pool_size: int = 1024):
+    def __init__(
+        self,
+        device: torch.device,
+        pool_size: int = 1024,
+        fill_value: torch.Tensor = None,
+    ):
         self.device = device
         self._pool_size = pool_size
         self._masks: List[torch.Tensor] = []
+        self._fill_value = fill_value.to(device) if fill_value is not None else None
 
     @staticmethod
-    def _compute_fill_value(cfg) -> float:
-        """计算归一化后的填充值（黑色）"""
-        mean, std = np.mean(cfg.dataset_mean), np.mean(cfg.dataset_std)
-        return (0.0 - mean) / std
+    def _compute_fill_value(cfg, use_mean: bool = False) -> torch.Tensor:
+        """计算归一化后的填充值，返回各通道值
+
+        Args:
+            cfg: 配置对象
+            use_mean: 如果为 True，填充均值（归一化后为0）；否则填充黑色
+        """
+        if use_mean:
+            # 均值在归一化后为 0
+            num_channels = len(cfg.dataset_mean)
+            return torch.zeros(num_channels, 1, 1, dtype=torch.float32)
+        else:
+            # 黑色 (0, 0, 0) 归一化后的值
+            mean = np.array(cfg.dataset_mean)
+            std = np.array(cfg.dataset_std)
+            fill = (0.0 - mean) / std  # [C]
+            return torch.tensor(fill, dtype=torch.float32).view(-1, 1, 1)  # [C, 1, 1]
 
     def precompute_masks(self, target_ratio: float):
         """预计算 mask 池，子类必须实现"""
@@ -163,8 +180,25 @@ class AugmentationMethod:
         ratio: float,
         prob: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用增强方法，子类必须实现"""
-        raise NotImplementedError
+        """应用增强方法（默认实现：单通道 mask + 分通道填充）
+
+        子类如有特殊 mask 形状（如 PixelHaS），需覆盖此方法。
+        """
+        if random.random() > prob:
+            return images, targets
+        if not self._masks:
+            raise RuntimeError(
+                f"{self.__class__.__name__}: call precompute_masks() first"
+            )
+
+        B, C, H, W = images.shape
+        augmented = images.clone()
+        for b in range(B):
+            m = random.choice(self._masks).squeeze(0)  # [1, H, W]
+            augmented[b] = (
+                images[b] * m + (1 - m) * self._fill_value
+            )  # [C, 1, 1] broadcasts
+        return augmented, targets
 
 
 @register_augmentation("cutout")
@@ -180,11 +214,10 @@ class CutoutAugmentation(AugmentationMethod):
         height: int,
         width: int,
         pool_size: int = 1024,
-        fill_value: float = 0.0,
+        fill_value: torch.Tensor = None,
     ):
-        super().__init__(device, pool_size)
+        super().__init__(device, pool_size, fill_value)
         self.height, self.width = height, width
-        self._fill_value = fill_value
 
     @classmethod
     def from_config(cls, device, cfg):
@@ -193,7 +226,7 @@ class CutoutAugmentation(AugmentationMethod):
             cfg.image_size,
             cfg.image_size,
             cfg.mask_pool_size,
-            cls._compute_fill_value(cfg),
+            cls._compute_fill_value(cfg, cfg.augmentation_use_mean_fill),
         )
 
     def precompute_masks(self, target_ratio: float):
@@ -209,20 +242,6 @@ class CutoutAugmentation(AugmentationMethod):
                 mask[:, :, y : y + size, x : x + size] = 0
             self._masks.append(mask)
 
-    def apply(self, images, targets, ratio, prob) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用 Cutout 增强"""
-        if random.random() > prob:
-            return images, targets
-        if not self._masks:
-            raise RuntimeError("Cutout: call precompute_masks() first")
-
-        B, C, H, W = images.shape
-        augmented = images.clone()
-        for b in range(B):
-            m = random.choice(self._masks).expand(-1, C, -1, -1).squeeze(0)
-            augmented[b] = images[b] * m + (1 - m) * self._fill_value
-        return augmented, targets
-
 
 @register_augmentation("pixel_has")
 class PixelHaSAugmentation(AugmentationMethod):
@@ -236,13 +255,11 @@ class PixelHaSAugmentation(AugmentationMethod):
         device: torch.device,
         height: int,
         width: int,
-        channels: int = 3,
         pool_size: int = 1024,
-        fill_value: float = 0.0,
+        fill_value: torch.Tensor = None,
     ):
-        super().__init__(device, pool_size)
-        self.height, self.width, self.channels = height, width, channels
-        self._fill_value = fill_value
+        super().__init__(device, pool_size, fill_value)
+        self.height, self.width = height, width
 
     @classmethod
     def from_config(cls, device, cfg):
@@ -250,32 +267,17 @@ class PixelHaSAugmentation(AugmentationMethod):
             device,
             cfg.image_size,
             cfg.image_size,
-            cfg.num_channels,
             cfg.mask_pool_size,
-            cls._compute_fill_value(cfg),
+            cls._compute_fill_value(cfg, cfg.augmentation_use_mean_fill),
         )
 
     def precompute_masks(self, target_ratio: float):
-        """预计算 PixelHaS mask 池"""
-        H, W, C = self.height, self.width, self.channels
+        """预计算 PixelHaS mask 池（单通道，每像素独立随机）"""
+        H, W = self.height, self.width
         self._masks = []
         for _ in range(self._pool_size):
-            mask = (torch.rand((1, C, H, W), device=self.device) > target_ratio).float()
+            mask = (torch.rand((1, 1, H, W), device=self.device) > target_ratio).float()
             self._masks.append(mask)
-
-    def apply(self, images, targets, ratio, prob) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用像素级 HaS 增强"""
-        if random.random() > prob:
-            return images, targets
-        if not self._masks:
-            raise RuntimeError("PixelHaS: call precompute_masks() first")
-
-        B, C, H, W = images.shape
-        augmented = images.clone()
-        for b in range(B):
-            m = random.choice(self._masks).squeeze(0)  # [C, H, W]
-            augmented[b] = images[b] * m + (1 - m) * self._fill_value
-        return augmented, targets
 
 
 @register_augmentation("gridmask")
@@ -292,15 +294,14 @@ class GridMaskAugmentation(AugmentationMethod):
         height: int,
         width: int,
         pool_size: int = 1024,
-        d_ratio_min: float = 0.1,
-        d_ratio_max: float = 0.3,
-        fill_value: float = 0.0,
+        d_ratio_min: float = 0.4,
+        d_ratio_max: float = 0.6,
+        fill_value: torch.Tensor = None,
     ):
-        super().__init__(device, pool_size)
+        super().__init__(device, pool_size, fill_value)
         self.height, self.width = height, width
         self.d_ratio_min = d_ratio_min
         self.d_ratio_max = d_ratio_max
-        self._fill_value = fill_value
 
     @classmethod
     def from_config(cls, device, cfg):
@@ -340,20 +341,6 @@ class GridMaskAugmentation(AugmentationMethod):
                     mask[:, :, y1:y2, x1:x2] = 0
         return mask
 
-    def apply(self, images, targets, ratio, prob) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用 GridMask 增强"""
-        if random.random() > prob:
-            return images, targets
-        if not self._masks:
-            raise RuntimeError("GridMask: call precompute_masks() first")
-
-        B, C, H, W = images.shape
-        augmented = images.clone()
-        for b in range(B):
-            m = random.choice(self._masks).expand(-1, C, -1, -1).squeeze(0)
-            augmented[b] = images[b] * m + (1 - m) * self._fill_value
-        return augmented, targets
-
 
 @register_augmentation("perlin")
 class PerlinMaskAugmentation(AugmentationMethod):
@@ -370,10 +357,10 @@ class PerlinMaskAugmentation(AugmentationMethod):
         pool_size: int = 1024,
         persistence: float = 0.5,
         octaves: int = 4,
-        scale_ratio: float = 0.3,
-        fill_value: float = 0.0,
+        scale_ratio: float = 0.25,
+        fill_value: torch.Tensor = None,
     ):
-        super().__init__(device, pool_size)
+        super().__init__(device, pool_size, fill_value)
         self.height, self.width = height, width
         self.mask_generator = _CloudMaskGenerator(
             height,
@@ -383,7 +370,6 @@ class PerlinMaskAugmentation(AugmentationMethod):
             octaves,
             scale_ratio,
         )
-        self._fill_value = fill_value
 
     @classmethod
     def from_config(cls, device, cfg):
@@ -401,20 +387,6 @@ class PerlinMaskAugmentation(AugmentationMethod):
     def precompute_masks(self, target_ratio: float):
         """预计算 Perlin mask 池"""
         self._masks = self.mask_generator.generate_batch(self._pool_size, target_ratio)
-
-    def apply(self, images, targets, ratio, prob) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用 Perlin 噪声增强"""
-        if random.random() > prob:
-            return images, targets
-        if not self._masks:
-            raise RuntimeError("Perlin: call precompute_masks() first")
-
-        B, C, H, W = images.shape
-        augmented = images.clone()
-        for b in range(B):
-            m = random.choice(self._masks).expand(-1, C, -1, -1).squeeze(0)
-            augmented[b] = images[b] * m + (1 - m) * self._fill_value
-        return augmented, targets
 
 
 @register_augmentation("none")

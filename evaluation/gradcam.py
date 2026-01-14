@@ -6,13 +6,17 @@ Grad-CAM 分析模块
 包含: _GradCAM (内部), GradCAMAnalyzer, ModelListWrapper
 """
 
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 
-from ..utils import get_logger
+from ..utils import ensure_dir, get_logger
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ Grad-CAM 目标层辅助函数                                                      ║
@@ -210,6 +214,11 @@ class GradCAMAnalyzer:
         # 计算指标
         metrics = self._compute_diversity_metrics(all_cams, all_preds, labels)
 
+        # 可视化并保存
+        eval_dir = self.cfg.evaluation_dir
+        vis_dir = f"{eval_dir}/gradcam"
+        self._visualize_and_save(samples, labels, all_cams, all_preds, vis_dir)
+
         return metrics
 
     def _compute_diversity_metrics(
@@ -286,6 +295,71 @@ class GradCAMAnalyzer:
         }
 
         return overall_metrics
+
+    def _visualize_and_save(
+        self,
+        samples: torch.Tensor,
+        labels: List[int],
+        all_cams: List[List[np.ndarray]],
+        all_preds: List[List[int]],
+        save_dir: str,
+    ):
+        """可视化并保存部分Grad-CAM结果"""
+        import matplotlib.pyplot as plt
+
+        ensure_dir(save_dir)
+        num_vis = min(5, len(samples))  # 默认可视化前5张
+
+        # 反归一化参数 (假设是 ImageNet/CIFAR 标准化)
+        mean = np.array(self.cfg.dataset_mean or [0.485, 0.456, 0.406])
+        std = np.array(self.cfg.dataset_std or [0.229, 0.224, 0.225])
+
+        for i in range(num_vis):
+            # 1. 准备原始图像
+            img_tensor = samples[i].cpu()
+            # Denormalize: (tensor * std) + mean
+            img = img_tensor.permute(1, 2, 0).numpy()
+            img = std * img + mean
+            img = np.clip(img, 0, 1)
+
+            # 2. 创建画布
+            num_models = len(all_cams)
+            fig, axes = plt.subplots(
+                1, num_models + 1, figsize=(4 * (num_models + 1), 4)
+            )
+            if num_models == 0:
+                axes = [axes]  # Handle case with 0 models if ever possible
+
+            # 原始图像
+            axes[0].imshow(img)
+            axes[0].set_title(f"True: {labels[i]}", fontsize=12)
+            axes[0].axis("off")
+
+            # 3. 叠加每个模型的 CAM
+            for m_idx in range(num_models):
+                cam = all_cams[m_idx][i]  # [H, W]
+                pred = all_preds[m_idx][i]
+
+                # visualization = show_cam_on_image(img, cam, use_rgb=True)
+                # 手动叠加以更好地控制
+                heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+                heatmap = np.float32(heatmap) / 255
+                heatmap = heatmap[..., ::-1]  # BGR to RGB
+
+                if np.max(img) > 1:
+                    img /= 255
+                cam_result = heatmap + np.float32(img)
+                cam_result = cam_result / np.max(cam_result)
+
+                axes[m_idx + 1].imshow(cam_result)
+                axes[m_idx + 1].set_title(f"M{m_idx} Pred: {pred}", fontsize=12)
+                axes[m_idx + 1].axis("off")
+
+            plt.tight_layout()
+            save_path = f"{save_dir}/sample_{i}_gradcam.png"
+            plt.savefig(save_path, dpi=self.cfg.plot_dpi, bbox_inches="tight")
+            plt.close()
+            get_logger().info(f"    Saved Grad-CAM vis to: {save_path}")
 
 
 class ModelListWrapper:

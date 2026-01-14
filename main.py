@@ -13,7 +13,7 @@ import datetime
 from pathlib import Path
 
 from .config import Config
-from .datasets import load_dataset
+from .datasets import configure_dataset_params, load_dataset
 from .evaluation import ReportGenerator
 from .training import train_experiment
 from .utils import ensure_dir, get_logger, set_seed
@@ -33,18 +33,21 @@ def main():
 
 def _parse_args():
     p = argparse.ArgumentParser(description="NDE")
-    p.add_argument("--config", type=str, default="config/default.yaml")
     p.add_argument("--eval", action="store_true")
     p.add_argument("--quick-test", action="store_true")
     return p.parse_args()
 
 
 def _init_config(args):
-    path = Path(args.config)
+    config_name = "config/default.yaml"
+    path = Path(config_name)
     if not path.exists():
-        path = Path(__file__).parent / args.config
+        path = Path(__file__).parent / config_name
 
     base_cfg, experiments, eval_ckpts = Config.load_yaml(str(path))
+
+    # [New] 手动触发布局配置 (解耦合)
+    configure_dataset_params(base_cfg)
 
     # 应用 quick_test 模式
     if args.quick_test:
@@ -63,8 +66,6 @@ def _run_training(cfg):
     )
 
     train_loader, val_loader = load_dataset(cfg, mode="train")
-
-    generated_ckpts = []
 
     # 生成统一的训练批次目录 (所有实验共享)
     batch_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -87,16 +88,6 @@ def _run_training(cfg):
         ensure_dir(c.save_dir)
 
         train_experiment(cfg=c, train_loader=train_loader, val_loader=val_loader)
-
-        # 收集 checkpoint 路径
-        # 实际路径: batch_dir/exp_name/checkpoints/best
-        ckpt_path = Path(c.save_dir) / "checkpoints" / "best"
-        if ckpt_path.exists():
-            generated_ckpts.append(
-                {"name": f"{exp.name}", "path": str(ckpt_path), "model": c.model_name}
-            )
-
-    return generated_ckpts
 
 
 def _run_evaluation(cfg, args):

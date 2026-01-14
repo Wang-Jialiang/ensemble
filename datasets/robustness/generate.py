@@ -19,71 +19,64 @@ import warnings
 from pathlib import Path
 from typing import Optional
 
-# 强制使用 spawn 启动方法，解决 CUDA 在 fork 子进程中无法重新初始化的问题
-# 必须在任何 CUDA 调用之前设置
-try:
-    multiprocessing.set_start_method("spawn", force=True)
-except RuntimeError:
-    pass  # 已经设置过了
-
 import numpy as np
-from PIL import Image
-
-from ...utils import console
-
-
-def patch_dependencies():
-    """Monkey-patch dependencies for imagecorruptions compatibility."""
-    try:
-        import skimage.filters
-
-        original_gaussian = skimage.filters.gaussian
-
-        def patched_gaussian(*args, **kwargs):
-            if "multichannel" in kwargs:
-                multichannel = kwargs.pop("multichannel")
-                if multichannel and "channel_axis" not in kwargs:
-                    kwargs["channel_axis"] = -1
-            return original_gaussian(*args, **kwargs)
-
-        skimage.filters.gaussian = patched_gaussian
-    except (ImportError, AttributeError):
-        pass
-    try:
-        import numpy as np
-
-        if not hasattr(np, "float_"):
-            np.float_ = np.float64
-    except (ImportError, AttributeError):
-        pass
-
-
-patch_dependencies()
-
+import skimage.filters
 import torch
+from diffusers import (
+    EulerDiscreteScheduler,
+    StableDiffusionXLPipeline,
+)
+from PIL import Image
 from safetensors.torch import load_file
 
-warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
-warnings.filterwarnings("ignore", category=UserWarning, module="imagecorruptions")
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="imagecorruptions")
-warnings.filterwarnings("ignore", "invalid value encountered in divide")
-warnings.filterwarnings("ignore", "invalid value encountered in cast")
-warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
-
-try:
-    from diffusers import (
-        EulerDiscreteScheduler,
-        StableDiffusionXLImg2ImgPipeline,
-        StableDiffusionXLPipeline,
-        UNet2DConditionModel,
-    )
-except ImportError:
-    pass
-
 from ...config import Config
-from ...utils import ensure_dir, get_logger
+from ...utils import console, ensure_dir, get_logger
 from ..preloaded import DATASET_REGISTRY
 from .corruption import CORRUPTIONS, SEVERITIES
+
+# 注意: 为解决 CUDA 在 fork 子进程中无法重新初始化的问题，
+# 使用 multiprocessing.get_context("spawn") 创建局部上下文
+# 而非全局 set_start_method，避免影响其他模块
+
+
+# =============================================================================
+# Monkey-patch dependencies for imagecorruptions compatibility
+# =============================================================================
+
+original_gaussian = skimage.filters.gaussian
+
+
+def patched_gaussian(*args, **kwargs):
+    if "multichannel" in kwargs:
+        multichannel = kwargs.pop("multichannel")
+        if multichannel and "channel_axis" not in kwargs:
+            kwargs["channel_axis"] = -1
+    return original_gaussian(*args, **kwargs)
+
+
+skimage.filters.gaussian = patched_gaussian
+
+if not hasattr(np, "float_"):
+    np.float_ = np.float64
+
+
+def _suppress_known_warnings():
+    """集中管理已知的无害警告"""
+    # 依赖库兼容性警告
+    warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
+    warnings.filterwarnings("ignore", category=UserWarning, module="imagecorruptions")
+    warnings.filterwarnings(
+        "ignore", category=RuntimeWarning, module="imagecorruptions"
+    )
+    # 数值计算警告 (Corruption 生成中的边界情况)
+    warnings.filterwarnings("ignore", "invalid value encountered in divide")
+    warnings.filterwarnings("ignore", "invalid value encountered in cast")
+    # Diffusers 版本警告
+    warnings.filterwarnings("ignore", category=FutureWarning, module="diffusers")
+
+
+_suppress_known_warnings()
+
 
 # =============================================================================
 # 可视化工具
@@ -123,16 +116,6 @@ def save_visual_comparison(
 # =============================================================================
 
 
-def _prepare_pil_batch(images_np: np.ndarray, target_size: int = 512):
-    """将 numpy 批量图像转换为 PIL 格式并统一缩放（512 对 CIFAR-10 足够）"""
-    return [
-        Image.fromarray(img.astype(np.uint8)).resize(
-            (target_size, target_size), Image.LANCZOS
-        )
-        for img in images_np
-    ]
-
-
 def _convert_to_numpy_batch(images_pil: list, target_size: tuple):
     """将 PIL 批量图像恢复到目标尺寸并转回 numpy 格式"""
     return [np.array(img.resize(target_size, Image.LANCZOS)) for img in images_pil]
@@ -164,15 +147,6 @@ def _load_test_set_numpy(DatasetClass, root, seed=42):
     images_np = dataset.images.permute(0, 2, 3, 1).numpy()
     labels_np = dataset.targets.numpy()
     return images_np, labels_np
-
-
-def _sample_dataset(images_np, labels_np, n, seed=42):
-    """对数据集进行随机抽样"""
-    if n is None or n >= len(images_np):
-        return images_np, labels_np
-    np.random.seed(seed)
-    indices = np.random.choice(len(images_np), size=n, replace=False)
-    return images_np[indices], labels_np[indices]
 
 
 # =============================================================================
@@ -230,7 +204,6 @@ class LightningPipelineLoader:
     """SDXL Lightning Pipeline 加载器 (单例模式)"""
 
     _text2img_cache = {}
-    _img2img_cache = {}
 
     @classmethod
     def get_text2img(
@@ -245,21 +218,6 @@ class LightningPipelineLoader:
             StableDiffusionXLPipeline,
             cls._text2img_cache,
             "Text2Img",
-        )
-
-    @classmethod
-    def get_img2img(
-        cls, device: str, base_model: str, repo: str, ckpt: str
-    ) -> "StableDiffusionXLImg2ImgPipeline":
-        """获取 Img2Img Pipeline (强制本地单文件加载)"""
-        return cls._get_pipeline(
-            device,
-            base_model,
-            repo,
-            ckpt,
-            StableDiffusionXLImg2ImgPipeline,
-            cls._img2img_cache,
-            "Img2Img",
         )
 
     @classmethod
@@ -282,19 +240,6 @@ class LightningPipelineLoader:
             if not os.path.isfile(base_model):
                 raise FileNotFoundError(f"基础权重文件未找到: {base_model}")
 
-            # 寻找配套的离线配置文件 (.yaml)
-            config_path = base_model.rsplit(".", 1)[0] + ".yaml"
-            original_config = None
-            if os.path.exists(config_path):
-                get_logger().info(f"📜 发现配套离线配置: {config_path}")
-                original_config = config_path
-            else:
-                # 尝试在该目录下寻找任何一个 .yaml 文件作为备选
-                yaml_files = list(Path(base_model).parent.glob("*.yaml"))
-                if yaml_files:
-                    original_config = str(yaml_files[0])
-                    get_logger().info(f"📜 自动匹配目录下的配置: {original_config}")
-
             # 寻找配套的 CLIP 字典配置目录 (用于离线 Tokenizer/TextEncoder)
             # 优先寻找与模型同目录下的 'config' 文件夹
             config_dir = os.path.join(os.path.dirname(base_model), "config")
@@ -306,7 +251,6 @@ class LightningPipelineLoader:
             # 强制本地单文件加载 (如果提供了 original_config 和 local_config，则可全离线运行)
             pipe = pipe_cls.from_single_file(
                 base_model,
-                original_config=original_config,
                 config=local_config,
                 torch_dtype=torch.float16,
                 local_files_only=True,
@@ -337,35 +281,23 @@ class LightningPipelineLoader:
     @staticmethod
     def _try_enable_optimizations(pipe):
         """尝试启用显存优化和加速"""
-        # VAE slicing: 降低 VAE 编解码的峰值显存
-        try:
-            pipe.enable_vae_slicing()
-        except Exception:
-            pass
 
-        # VAE tiling: 支持任意大小输入
-        try:
-            pipe.enable_vae_tiling()
-        except Exception:
-            pass
+        pipe.enable_vae_slicing()
+        pipe.enable_vae_tiling()
+        pipe.enable_xformers_memory_efficient_attention()
+        get_logger().info("   ⚡ 已启用 xformers 加速")
 
-        # xformers: 高效注意力机制 (需要安装 xformers)
-        try:
-            pipe.enable_xformers_memory_efficient_attention()
-            get_logger().info("   ⚡ 已启用 xformers 加速")
-        except Exception:
-            pass
 
-        # torch.compile: 已禁用
-        # 原因: SDXL UNet 首次编译需要 10-30 分钟，对于 Lightning 4-step 推理收益很小
-        # 如果需要大量生成，可以考虑启用，但需要等待首次编译完成
-        # try:
-        #     import torch
-        #     if hasattr(torch, "compile") and torch.cuda.is_available():
-        #         pipe.unet = torch.compile(pipe.unet, mode="max-autotune", fullgraph=True)
-        #         get_logger().info("   ⚡ 已启用 torch.compile 加速")
-        # except Exception:
-        #     pass
+# torch.compile: 已禁用
+# 原因: SDXL UNet 首次编译需要 10-30 分钟，对于 Lightning 4-step 推理收益很小
+# 如果需要大量生成，可以考虑启用，但需要等待首次编译完成
+# try:
+#     import torch
+#     if hasattr(torch, "compile") and torch.cuda.is_available():
+#         pipe.unet = torch.compile(pipe.unet, mode="max-autotune", fullgraph=True)
+#         get_logger().info("   ⚡ 已启用 torch.compile 加速")
+# except Exception:
+#     pass
 
 
 # =============================================================================
@@ -501,13 +433,10 @@ class OODGenerator:
 
 def _process_single_corruption(args):
     """单种 corruption 处理函数 (用于 multiprocessing)"""
-    corruption, images_np, severities, output_dir, seed, slice_obj = args
+    corruption, images_np, severities, output_dir, seed = args
 
-    # 切片处理: 只处理分配给该 corruption 的部分数据
-    if slice_obj is not None:
-        images_to_process = images_np[slice_obj]
-    else:
-        images_to_process = images_np
+    # 全量处理: 不再支持切片
+    images_to_process = images_np
 
     all_severities = []
     for severity in severities:
@@ -560,8 +489,7 @@ def generate_corruption_dataset(
     seed: int = 42,
     force: bool = False,
 ) -> Path:
-    """预生成 corruption 数据集 (使用 CPU 多进程加速) - 默认采用类别均衡均衡切分"""
-    import math
+    """预生成 corruption 数据集 (使用 CPU 多进程加速) - 无论如何都生成全量数据 (Full Coverage)"""
     import multiprocessing
     import os
 
@@ -575,36 +503,20 @@ def generate_corruption_dataset(
         return output_dir
 
     get_logger().info(
-        f"🔧 生成 Corruption: {DatasetClass.NAME}-C (Balanced Strategy)..."
+        f"🔧 生成 Corruption: {DatasetClass.NAME}-C (Full Coverage Strategy)..."
     )
 
     images_np, labels_np = _load_test_set_numpy(DatasetClass, root, seed)
-    total_samples = len(labels_np)
 
-    # === 构建生成任务 (Category-Balanced Slicing) ===
+    # 全量模式: 仅仅传入 full data
+    # 不再由于类别均衡切分。
+    # 所有的 Corruptions 都应用在所有 Images 上
+
     tasks = []
 
-    # 按照类别分组分配数据片段
-    from .corruption import CORRUPTION_CATEGORIES
-
-    for category, corruption_list in CORRUPTION_CATEGORIES.items():
-        num_types = len(corruption_list)
-        chunk_size = math.ceil(total_samples / num_types)
-
-        for i, corruption in enumerate(corruption_list):
-            start_idx = i * chunk_size
-            end_idx = min((i + 1) * chunk_size, total_samples)
-
-            # 如果起始索引超出范围 (例如向上取整导致溢出)，修正为最后一段或空
-            if start_idx >= total_samples:
-                # 理论上 ceil 不会发生这种情况，除非 num_types > total_samples，这里做个兜底
-                start_idx = total_samples
-                end_idx = total_samples
-
-            slice_obj = slice(start_idx, end_idx)
-            tasks.append(
-                (corruption, images_np, SEVERITIES, output_dir, seed, slice_obj)
-            )
+    for corruption in CORRUPTIONS:
+        # Full Mode: 传递 None 作为 slice_obj，表示处理全量
+        tasks.append((corruption, images_np, SEVERITIES, output_dir, seed))
 
     # ===============================================
 
@@ -627,14 +539,16 @@ def generate_corruption_dataset(
     ) as progress:
         task_id = progress.add_task("   Corruption 总进度", total=len(tasks))
 
-        with multiprocessing.Pool(processes=min(len(tasks), num_cpus)) as pool:
+        # 使用 spawn 上下文创建进程池 (不污染全局设置)
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(processes=min(len(tasks), num_cpus)) as pool:
             for _ in pool.imap_unordered(_process_single_corruption, tasks):
                 progress.update(task_id, advance=1)
 
     np.save(str(output_dir / "labels.npy"), labels_np)
 
     get_logger().info(
-        f"✅ {DatasetClass.NAME}-C 生成完成: {len(tasks)} corruptions (Category-Balanced)"
+        f"✅ {DatasetClass.NAME}-C 生成完成: {len(tasks)} corruptions (Full Coverage)"
     )
     return output_dir
 
@@ -670,57 +584,39 @@ def generate_ood_dataset(
 
     start_time = time.time()
     num_gpus = torch.cuda.device_count()
-    if num_gpus <= 1:
-        device = "cuda:0" if num_gpus == 1 else "cpu"
-        generator = OODGenerator(
-            device=device,
-            base_model=base_model,
-            lightning_repo=lightning_repo,
-            lightning_ckpt=lightning_ckpt,
-            prompts=prompts,
-            num_steps=num_steps,
+
+    # 使用 spawn 上下文 (CUDA 要求)
+    ctx = multiprocessing.get_context("spawn")
+
+    samples_per_gpu = num_samples // num_gpus
+    q = ctx.Queue()
+    processes = []
+
+    for i in range(num_gpus):
+        gpu_n = samples_per_gpu + (num_samples % num_gpus if i == num_gpus - 1 else 0)
+        p = ctx.Process(
+            target=_worker_ood_gpu,
+            args=(
+                i,
+                gpu_n,
+                DatasetClass.IMAGE_SIZE,
+                batch_size,
+                seed,
+                q,
+                base_model,
+                lightning_repo,
+                lightning_ckpt,
+                prompts,
+                num_steps,
+            ),
         )
-        imgs = generator.generate_batch(
-            num_samples=num_samples,
-            target_size=DatasetClass.IMAGE_SIZE,
-            batch_size=batch_size,
-            seed=seed,
-        )
-        np.save(str(output_dir / "images.npy"), imgs)
-    else:
-        import multiprocessing
+        p.start()
+        processes.append(p)
 
-        samples_per_gpu = num_samples // num_gpus
-        q = multiprocessing.Queue()
-        processes = []
-
-        for i in range(num_gpus):
-            gpu_n = samples_per_gpu + (
-                num_samples % num_gpus if i == num_gpus - 1 else 0
-            )
-            p = multiprocessing.Process(
-                target=_worker_ood_gpu,
-                args=(
-                    i,
-                    gpu_n,
-                    DatasetClass.IMAGE_SIZE,
-                    batch_size,
-                    seed,
-                    q,
-                    base_model,
-                    lightning_repo,
-                    lightning_ckpt,
-                    prompts,
-                    num_steps,
-                ),
-            )
-            p.start()
-            processes.append(p)
-
-        all_imgs = [q.get() for _ in range(num_gpus)]
-        for p in processes:
-            p.join()
-        np.save(str(output_dir / "images.npy"), np.concatenate(all_imgs, axis=0))
+    all_imgs = [q.get() for _ in range(num_gpus)]
+    for p in processes:
+        p.join()
+    np.save(str(output_dir / "images.npy"), np.concatenate(all_imgs, axis=0))
 
     elapsed = time.time() - start_time
     get_logger().info(
@@ -813,7 +709,7 @@ def _execute_generation(args, config):
         generate_ood_dataset(
             args.dataset,
             config.data_root,
-            gen_cfg.samples_per_group * 2,
+            gen_cfg.samples_per_group,
             config.seed,
             args.force,
             gen_cfg.batch_size,

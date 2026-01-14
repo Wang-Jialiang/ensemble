@@ -81,7 +81,7 @@ class ModelFactory:
 
     @staticmethod
     def create_model(
-        name: str, num_classes: int = 10, init: Optional[str] = None, **kwargs
+        name: str, num_classes: int = 10, init: Optional[str] = None
     ) -> nn.Module:
         """核心生产线: 路由 -> 实例化 -> 初始化"""
         name = name.lower()
@@ -91,7 +91,7 @@ class ModelFactory:
             raise ValueError(f"模型未注册: {name}. 支持: {list(MODEL_REGISTRY.keys())}")
 
         # 2. 实例化模型
-        model = MODEL_REGISTRY[name](num_classes, **kwargs)
+        model = MODEL_REGISTRY[name](num_classes)
 
         # 3. 策略初始化 (可选)
         if init:

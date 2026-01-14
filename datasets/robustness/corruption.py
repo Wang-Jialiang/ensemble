@@ -73,19 +73,15 @@ SEVERITIES = [1, 3, 5]
 
 
 class CorruptionDataset:
-    """Corruption 评估数据集 (仅支持预生成模式)
+    """Corruption 评估数据集 (Full Coverage 模式)
 
     从预生成的 .npy 文件加载 corruption 数据。
     使用 `python -m ensemble.datasets.robustness.generate` 预生成数据。
 
-    支持加载单一类型 (如 'gaussian_noise') 或 整个大类 (如 'noise')。
-
-    使用示例:
-        >>> dataset = CorruptionDataset.from_name("cifar10", "./data")
-        >>> loader = dataset.get_loader("noise", severity=3, config=config)
+    本类依赖于 `metadata.json` 文件，该文件由生成脚本自动创建。
     """
 
-    # 引用模块级常量
+    # 引用模块级常量 (保留兼容性)
     CORRUPTIONS = CORRUPTIONS
     CATEGORIES = CORRUPTION_CATEGORIES
     SEVERITIES = SEVERITIES
@@ -97,16 +93,19 @@ class CorruptionDataset:
                 f"未知数据集: {dataset_name}. 可用: {list(DATASET_REGISTRY.keys())}"
             )
 
-        self.name = dataset_name  # 保存名称供评估使用
+        self.name = dataset_name
         DatasetClass = DATASET_REGISTRY[dataset_name]
         self.data_dir = Path(root) / f"{DatasetClass.NAME}-C"
 
         # 1. 基础初始化
-        self._verify_installation(dataset_name)
+        get_logger().info(f"📥 准备加载 Corruption 数据: {self.data_dir}...")
+        self._verify_installation()
         self._init_statistics(DatasetClass)
         self._load_labels()
 
-    def _verify_installation(self, dataset_name):
+        get_logger().info("✅ Corruption 数据集准备就绪 (Full Coverage)")
+
+    def _verify_installation(self):
         """确保预生成数据包已安装"""
         labels_path = self.data_dir / "labels.npy"
         if not labels_path.exists():
@@ -120,6 +119,8 @@ class CorruptionDataset:
     def _load_labels(self):
         """加载标签文件"""
         labels_path = self.data_dir / "labels.npy"
+        if not labels_path.exists():
+            raise FileNotFoundError(f"Missing labels file: {labels_path}")
         self.labels = torch.from_numpy(np.load(str(labels_path))).long()
 
     def get_loader(
@@ -132,32 +133,19 @@ class CorruptionDataset:
 
         # 2. 收集数据批次
         all_data, all_labels = [], []
-        total_samples = len(self.labels)
+
+        # 全量模式下，每个 corruption 对应的都是完整的 labels
+        current_labels = self.labels
 
         for c_type in target_types:
             # 加载图像数据
             data = self._load_corruption(c_type, severity)
 
-            # 判断是否为完整数据 - 如果数据大小等于 labels 大小，说明是 Full 模式
-            # 如果数据大小小于 labels，说明是 Balanced Slicing 模式，需要切分 labels
-            if len(data) == total_samples:
-                # Full Mode
-                current_labels = self.labels
-            else:
-                # Balanced Mode: 计算该 corruption 对应的 slice
-                slice_obj = self._get_slice_indices(c_type, total_samples)
-                current_labels = self.labels[slice_obj]
-
-                # 简单校验
-                if len(data) != len(current_labels):
-                    # 容错: 如果切片计算有细微误差 (e.g. 尾部处理), 尝试以数据长度为准
-                    # 这通常不应该发生，除非 generate.py 逻辑变更
-                    get_logger().warning(
-                        f"Data/Label Mismatch for {c_type}: Data={len(data)}, LabelSlice={len(current_labels)}. "
-                        "Using data length."
-                    )
-                    # 重新对齐: 如果数据少，就再切 label；如果数据多(不可能)，就报错
-                    current_labels = current_labels[: len(data)]
+            # 校验数据长度
+            if len(data) != len(current_labels):
+                raise ValueError(
+                    f"Data length mismatch for {c_type}: data={len(data)}, labels={len(current_labels)}"
+                )
 
             all_data.append(data)
             all_labels.append(current_labels)
@@ -166,36 +154,6 @@ class CorruptionDataset:
         return self._prepare_dataloader(
             torch.cat(all_data, dim=0), torch.cat(all_labels, dim=0), config
         )
-
-    def _get_slice_indices(self, corruption_type: str, total_samples: int) -> slice:
-        """根据 Corruption 类型和总样本数，计算其在 Balanced 模式下的数据切片"""
-        import math
-
-        # 找到该 corruption 所属的 category 及其索引
-        found_cat, found_list = None, None
-        for cat, c_list in self.CATEGORIES.items():
-            if corruption_type in c_list:
-                found_cat = cat
-                found_list = c_list
-                break
-
-        if not found_cat:
-            # Should not happen if _resolve_types works
-            return slice(0, total_samples)
-
-        num_types = len(found_list)
-        chunk_size = math.ceil(total_samples / num_types)
-        idx_in_cat = found_list.index(corruption_type)
-
-        start_idx = idx_in_cat * chunk_size
-        end_idx = min((idx_in_cat + 1) * chunk_size, total_samples)
-
-        # 边界修正 (同 generate.py)
-        if start_idx >= total_samples:
-            start_idx = total_samples
-            end_idx = total_samples
-
-        return slice(start_idx, end_idx)
 
     def _resolve_types(self, corruption_type: str) -> list:
         """解析输入的类型名称(单类或具体类型)"""
@@ -218,21 +176,26 @@ class CorruptionDataset:
 
     def _load_corruption(self, corruption_type: str, severity: int) -> torch.Tensor:
         """从预生成文件加载单个 corruption 类型的数据"""
-        # 1. 读取对应严重程度的数据切片
-        images_np = self._read_npy_slice(corruption_type, severity)
+        # 1. 构造文件名
+        filename = f"{corruption_type}.npy"
 
-        # 2. 转换为标准化的 Tensor
+        # 2. 读取对应严重程度的数据切片
+        images_np = self._read_npy_slice(filename, severity)
+
+        # 3. 转换为标准化的 Tensor
         return self._postprocess_tensor(images_np)
 
-    def _read_npy_slice(self, corruption_type: str, severity: int) -> np.ndarray:
+    def _read_npy_slice(self, filename: str, severity: int) -> np.ndarray:
         """执行具体的二进制文件读取和切片计算"""
         if severity not in self.SEVERITIES:
             raise ValueError(f"Severity 必须在 {self.SEVERITIES} 中, 得到 {severity}")
 
-        file_path = self.data_dir / f"{corruption_type}.npy"
+        file_path = self.data_dir / filename
         if not file_path.exists():
-            raise FileNotFoundError(f"未找到 corruption 文件: {file_path}")
+            raise FileNotFoundError(f"未找到数据文件: {file_path}")
 
+        # 使用 mmap 模式读取，避免一次性加载过大文件 (视情况而定，这里先 load 进来)
+        # 注意: 如果文件巨大，建议改用 mmap_mode='r' 并小心处理
         data = np.load(str(file_path))
 
         # 计算切片索引 (假设数据按 severity 排序堆叠)

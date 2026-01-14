@@ -23,7 +23,6 @@ from .init import (
     INIT_REGISTRY,
     apply_init,
     get_supported_inits,
-    init_default,
     init_kaiming,
     init_orthogonal,
     init_xavier,
@@ -52,7 +51,6 @@ __all__ = [
     "init_kaiming",
     "init_xavier",
     "init_orthogonal",
-    "init_default",
     "apply_init",
     "get_supported_inits",
     # Registry & Factory

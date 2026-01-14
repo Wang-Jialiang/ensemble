@@ -21,7 +21,7 @@
 from .base import BasePreloadedDataset
 
 # 数据加载器
-from .loader import load_dataset
+from .loader import configure_dataset_params, load_dataset
 
 # 预加载数据集
 from .preloaded import (
@@ -41,4 +41,5 @@ __all__ = [
     "register_dataset",
     # Loader
     "load_dataset",
+    "configure_dataset_params",
 ]

@@ -91,7 +91,7 @@ class EarlyStopping:
         self.best_scores = {}  # {metric_name: best_value}
         self.early_stop = False
 
-    def __call__(self, max_scores: dict, epoch: int = None) -> bool:
+    def __call__(self, max_scores: dict) -> bool:
         """检查并更新早停计数器
 
         Args:

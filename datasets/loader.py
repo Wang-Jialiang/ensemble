@@ -44,6 +44,28 @@ def load_dataset(cfg, mode: str = "all"):
         return test_loader, *robustness_suite
 
 
+def configure_dataset_params(cfg):
+    """
+    根据数据集配置填充 Config 对象 (解耦版)
+
+    Args:
+        cfg: Config 对象 (将被原地修改)
+    """
+    dataset_name = cfg.dataset_name.lower()
+    DatasetClass = _get_dataset_class(dataset_name)
+
+    cfg.num_classes = DatasetClass.NUM_CLASSES
+    cfg.image_size = DatasetClass.IMAGE_SIZE
+    cfg.num_channels = DatasetClass.NUM_CHANNELS
+    cfg.dataset_mean = DatasetClass.MEAN
+    cfg.dataset_std = DatasetClass.STD
+
+    # 按需覆盖数据集定义的特殊参数
+    for k, v in getattr(DatasetClass, "CONFIG_OVERRIDES", {}).items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, v)
+
+
 def _get_dataset_class(name):
     """从注册表获取类，处理错误"""
     if name not in DATASET_REGISTRY:
@@ -109,7 +131,7 @@ def _init_robustness_group(cfg, name):
     if cfg.corruption_dataset:
         try:
             c_ds = CorruptionDataset(name, cfg.data_root)
-        except Exception as e:
+        except (FileNotFoundError, ValueError) as e:
             get_logger().warning(f"   ⚠️ Corruption 数据集不可用: {e}")
     results.append(c_ds)
 
@@ -118,7 +140,7 @@ def _init_robustness_group(cfg, name):
     if cfg.ood_dataset:
         try:
             o_ds = OODDataset(id_dataset=name, root=cfg.data_root)
-        except Exception as e:
+        except (FileNotFoundError, ValueError) as e:
             get_logger().warning(f"   ⚠️ OOD 数据集不可用: {e}")
     results.append(o_ds)
 

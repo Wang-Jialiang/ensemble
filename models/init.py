@@ -44,7 +44,7 @@ def init_kaiming(model: nn.Module) -> None:
             nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
 
@@ -57,7 +57,7 @@ def init_xavier(model: nn.Module) -> None:
             nn.init.xavier_normal_(m.weight)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
 
@@ -70,15 +70,9 @@ def init_orthogonal(model: nn.Module) -> None:
             nn.init.orthogonal_(m.weight)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+        elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm, nn.LayerNorm)):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
-
-
-@register_init("default")
-def init_default(model: nn.Module) -> None:
-    """PyTorch 默认初始化 (不做任何修改)"""
-    pass
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -90,7 +84,9 @@ def apply_init(model: nn.Module, method: str = "kaiming") -> nn.Module:
     """解析并应用初始化策略"""
     method = method.lower()
     if method not in INIT_REGISTRY:
-        raise ValueError(f"不支持的初始化: {method}. 已注册: {list(INIT_REGISTRY.keys())}")
+        raise ValueError(
+            f"不支持的初始化: {method}. 已注册: {list(INIT_REGISTRY.keys())}"
+        )
 
     INIT_REGISTRY[method](model)
     return model

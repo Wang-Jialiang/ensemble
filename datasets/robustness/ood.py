@@ -76,6 +76,10 @@ class OODDataset:
         self._mean = torch.tensor(id_class.MEAN).view(1, 3, 1, 1)
         self._std = torch.tensor(id_class.STD).view(1, 3, 1, 1)
 
+    def __len__(self):
+        """返回数据集大小"""
+        return len(self.images)
+
     def get_loader(self, config: "Config") -> DataLoader:
         """获取 OOD 数据加载器"""
         # 1. 标准化图像

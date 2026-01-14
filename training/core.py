@@ -364,7 +364,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 self._handle_epoch_post(epoch, stats)
                 # 早停在 warmup + progressive 阶段后生效 (所有模式统一)
                 finetune_start = self.cfg.warmup_epochs + self.cfg.progressive_epochs
-                if epoch >= finetune_start and self.early_stopping(stats, epoch):
+                if epoch >= finetune_start and self.early_stopping(stats):
                     break
 
             self._finalize_training()

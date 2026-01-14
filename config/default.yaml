@@ -28,7 +28,7 @@ constants:
   # 对抗鲁棒性评估 (Madry et al., 2018; RobustBench)
   adv_eps: 0.03137                  # ε = 8/255 (单值评估时使用)
   adv_alpha: 0.00784                # α = 2/255
-  adv_pgd_steps: 10                 # PGD 标准迭代数
+  adv_pgd_steps: 20                 # PGD 标准迭代数
   
   # 多 ε 评估 (传入列表即启用多 ε 评估模式)
   # adv_eps_list: [0.00784, 0.01569, 0.03137, 0.06275]  # [2/255, 4/255, 8/255, 16/255]
@@ -45,10 +45,10 @@ constants:
   perlin_octaves: 4                  # Perlin 噪声 octaves 数量
 
   # 可视化
-  plot_dpi: 300                     # 图表保存 DPI
+  plot_dpi: 600                     # 图表保存 DPI
 
   # Grad-CAM 分析参数
-  gradcam_num_samples: 100          # Grad-CAM 分析样本数
+  gradcam_num_samples: 200          # Grad-CAM 分析样本数
 
 # ==============================================================================
 # 可调参数
@@ -80,8 +80,9 @@ base:
 
   # [增强细节调整]
   perlin_scale_ratio: 0.25          # Perlin 噪声尺度比例 (0.2 约产生 2-3 个主要遮挡块)
-  gridmask_d_ratio_min: 0.15        # GridMask 最小网格 (更细碎)
-  gridmask_d_ratio_max: 0.35        # GridMask 最大网格 (避免单一遮挡)
+  gridmask_d_ratio_min: 0.4        # GridMask 最小网格 (约产生 3-4 个遮挡块)
+  gridmask_d_ratio_max: 0.6        # GridMask 最大网格 (与 Perlin 遮挡块数量一致)
+  augmentation_use_mean_fill: false  # 遮挡填充: false=黑色, true=均值(灰色)
 
   # ==========================================================================
   # [阶段训练专用] 三阶段与 Mask - 仅 StagedEnsembleTrainer 使用
@@ -123,7 +124,7 @@ base:
   # ==========================================================================
   # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用
   # ==========================================================================
-  init_method: "kaiming"            # 初始化方法: "kaiming", "xavier", "orthogonal", "default"
+  init_method: "kaiming"            # 初始化方法: "kaiming", "xavier", "orthogonal"
 
   # ==========================================================================
   # [全局] 运行控制 - 被 StagedEnsembleTrainer 使用
@@ -147,12 +148,12 @@ experiments:
   # Perlin 噪声遮挡
   # ============================================================================
   - name: "Exp01_Perlin_Curriculum"
-    desc: "Perlin + Curriculum Learning"
+
     augmentation_method: "perlin"
     use_curriculum: true
 
   - name: "Exp02_Perlin_Fixed"
-    desc: "Perlin + Fixed Ratio"
+
     augmentation_method: "perlin"
     use_curriculum: false
 
@@ -160,53 +161,46 @@ experiments:
   # Cutout 硬遮挡
   # ============================================================================
   - name: "Exp03_Cutout_Curriculum"
-    desc: "Cutout + Curriculum Learning"
+
     augmentation_method: "cutout"
     use_curriculum: true
 
   - name: "Exp04_Cutout_Fixed"
-    desc: "Cutout + Fixed Ratio"
+
     augmentation_method: "cutout"
     use_curriculum: false
 
-  # ============================================================================
-  # GridMask 网格遮挡
-  # ============================================================================
-  - name: "Exp05_GridMask_Curriculum"
-    desc: "GridMask + Curriculum Learning"
-    augmentation_method: "gridmask"
-    use_curriculum: true
+  # # ============================================================================
+  # # GridMask 网格遮挡
+  # # ============================================================================
+  # - name: "Exp05_GridMask_Curriculum"
+  #   augmentation_method: "gridmask"
+  #   use_curriculum: true
 
-  - name: "Exp06_GridMask_Fixed"
-    desc: "GridMask + Fixed Ratio"
-    augmentation_method: "gridmask"
-    use_curriculum: false
+  # - name: "Exp06_GridMask_Fixed"
+  #   augmentation_method: "gridmask"
+  #   use_curriculum: false
 
-  # ============================================================================
-  # 像素级 Hide-and-Seek
-  # ============================================================================
-  - name: "Exp07_PixelHaS_Curriculum"
-    desc: "Pixel HaS + Curriculum Learning"
-    augmentation_method: "pixel_has"
-    use_curriculum: true
+  # # ============================================================================
+  # # 像素级 Hide-and-Seek
+  # # ============================================================================
+  # - name: "Exp07_PixelHaS_Curriculum"
+  #   augmentation_method: "pixel_has"
+  #   use_curriculum: true
 
-  - name: "Exp08_PixelHaS_Fixed"
-    desc: "Pixel HaS + Fixed Ratio"
-    augmentation_method: "pixel_has"
-    use_curriculum: false
+  # - name: "Exp08_PixelHaS_Fixed"
+  #   augmentation_method: "pixel_has"
+  #   use_curriculum: false
 
   # ============================================================================
   # Baseline (无增强)
   # ============================================================================
   - name: "Exp09_Baseline"
-    desc: "No Augmentation (Pure Baseline)"
+
     augmentation_method: "none"
     use_curriculum: false
 
-  # - name: "Exp10_Baseline"
-  #   desc: "No Augmentation (Pure Baseline)"
-  #   augmentation_method: "none"
-  #   use_curriculum: true
+
 
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
@@ -221,12 +215,11 @@ eval_checkpoints:
   - "Exp02_Perlin_Fixed"
   - "Exp03_Cutout_Curriculum"
   - "Exp04_Cutout_Fixed"
-  - "Exp05_GridMask_Curriculum"
-  - "Exp06_GridMask_Fixed"
-  - "Exp07_PixelHaS_Curriculum"
-  - "Exp08_PixelHaS_Fixed"
+  # - "Exp05_GridMask_Curriculum"
+  # - "Exp06_GridMask_Fixed"
+  # - "Exp07_PixelHaS_Curriculum"
+  # - "Exp08_PixelHaS_Fixed"
   - "Exp09_Baseline"
-  - "Exp10_Baseline"
 
 # ==============================================================================
 # 数据生成配置 (generate.py 使用)
@@ -235,9 +228,9 @@ generation:
   base_model: "/media/data/wjl/models/sdxl-base-1.0/sd_xl_base_1.0.safetensors"  # SDXL 基础模型
   lightning_repo: "/media/data/wjl/models/SDXL-Lightning"              # Lightning UNet 仓库
   lightning_ckpt: "sdxl_lightning_4step_unet.safetensors"  # 4-step UNet 检查点
-  num_steps: 4                                             # 推理步数 (2/4/8)
-  batch_size: 12                                           # 启用VAE优化后可提高
-  samples_per_group: 3000                                  # 每组样本数 (500足够评估)
+  num_steps: 4                                             # 推理步数
+  batch_size: 16                                           # 启用VAE优化后可提高
+  samples_per_group: 10000                                  # OOD 生成总图片数 (自动分配到各GPU)
   visualize: true                                          # 是否生成可视化对比图
   num_vis: 3                                              # 每个类别/风格可视化的样本数
 

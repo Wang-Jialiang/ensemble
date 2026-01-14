@@ -36,6 +36,7 @@ class BasePreloadedDataset(Dataset):
     STD = [0.229, 0.224, 0.225]
     IMAGE_SIZE = 224
     NUM_CLASSES = 1000
+    NUM_CHANNELS = 3
     NAME = "Base"
 
     def __init__(self, root: str, train: bool):
@@ -53,8 +54,8 @@ class BasePreloadedDataset(Dataset):
 
     def _init_runtime_stats(self):
         """基于类属性初始化运行时张量"""
-        self._mean = torch.tensor(self.MEAN).view(3, 1, 1)
-        self._std = torch.tensor(self.STD).view(3, 1, 1)
+        self._mean = torch.tensor(self.MEAN).view(self.NUM_CHANNELS, 1, 1)
+        self._std = torch.tensor(self.STD).view(self.NUM_CHANNELS, 1, 1)
 
     def _load_data(self):
         """由子类实现的具体加载逻辑"""
