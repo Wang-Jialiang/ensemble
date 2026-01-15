@@ -48,7 +48,7 @@ constants:
   plot_dpi: 600                     # 图表保存 DPI
 
   # Grad-CAM 分析参数
-  gradcam_num_samples: 200          # Grad-CAM 分析样本数
+  gradcam_num_samples: 500          # Grad-CAM 分析样本数
 
 # ==============================================================================
 # 可调参数

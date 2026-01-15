@@ -203,10 +203,6 @@ def evaluate_adversarial(
             dataset if dataset is not None else getattr(cfg, "dataset_name", "cifar10")
         )
     else:
-        # 无配置时的默认兜底
-        eps = eps if eps is not None else 0.03137
-        alpha = alpha if alpha is not None else 0.00784
-        steps = steps if steps is not None else 10
         if dataset is None:
             raise ValueError("未提供 cfg 时必须显式指定 dataset 名称")
 
@@ -381,16 +377,8 @@ def _run_and_eval_attack(model, attack_fn, x, attack_labels, true_y, *args):
         true_y: 原始真实标签，用于评估攻击后的正确率
         *args: 攻击函数的其他参数
     """
-    prev_training = model.training
-    model.train()  # 确保允许梯度计算
-    for m in model.models:
-        m.eval()  # BN 维持 eval
-
     adv_x = attack_fn(model, x, attack_labels, *args)
-
-    model.train(prev_training)
     with torch.no_grad():
-        # 使用原始真实标签评估 (而不是攻击标签)
         return (model(adv_x).argmax(1) == true_y).sum().item()
 
 
@@ -401,4 +389,8 @@ def _summarize_adv_results(s, eps, alpha, steps, log):
         "fgsm_acc": 100 * s["fgsm"] / t,
         "pgd_acc": 100 * s["pgd"] / t,
     }
+    log.info(
+        f"  ε={eps * 255:.0f}/255 | Clean: {res['clean_acc']:.2f}% | "
+        f"FGSM: {res['fgsm_acc']:.2f}% | PGD: {res['pgd_acc']:.2f}%"
+    )
     return res

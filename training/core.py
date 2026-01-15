@@ -193,7 +193,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
         logger.addHandler(file_handler)
 
         # 控制台输出 (可通过配置关闭)
-        if getattr(self.cfg, "log_to_console", True):
+        if getattr(self.cfg, "log_to_console", False):
             console_handler = logging.StreamHandler(sys.stdout)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
@@ -380,7 +380,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 # 清理 wandb 本地缓存目录
                 wandb_dir = Path.cwd() / "wandb"
                 if wandb_dir.exists():
-                    shutil.rmtree(wandb_dir, ignore_errors=True)
+                    shutil.rmtree(wandb_dir, ignore_errors=False)
 
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
@@ -528,13 +528,11 @@ def train_experiment(
 
     # 训练
     trainer.train(train_loader, val_loader)
-    training_time = trainer.total_training_time
 
     # 加载最佳模型
     trainer.load_checkpoint("best")
-    trainer.total_training_time = training_time
 
     get_logger().info(f"✅ Training completed: {cfg.experiment_name}")
     get_logger().info(f"   Checkpoint saved to: {Path(cfg.save_dir) / 'checkpoints'}")
 
-    return trainer, training_time
+    return trainer, trainer.total_training_time

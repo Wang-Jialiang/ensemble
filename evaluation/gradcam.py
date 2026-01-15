@@ -346,8 +346,6 @@ class GradCAMAnalyzer:
                 heatmap = np.float32(heatmap) / 255
                 heatmap = heatmap[..., ::-1]  # BGR to RGB
 
-                if np.max(img) > 1:
-                    img /= 255
                 cam_result = heatmap + np.float32(img)
                 cam_result = cam_result / np.max(cam_result)
 

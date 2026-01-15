@@ -35,7 +35,6 @@ def evaluate_corruption(
         {
             "by_severity": {1: 85.2, 3: 72.1, 5: 58.3},  # 各强度平均 acc
             "by_category": {"noise": 70.5, "blur": 68.2, ...},  # 四大类平均 acc
-            "overall_avg": 72.1
         }
     """
     from tqdm import tqdm
@@ -96,8 +95,5 @@ def evaluate_corruption(
                     cat_accs.append(detail_results[sev][c])
         by_category[cat_name] = np.mean(cat_accs) if cat_accs else 0.0
     results["by_category"] = by_category
-
-    # 3. 总体平均
-    results["overall_avg"] = np.mean(list(by_severity.values()))
 
     return results
