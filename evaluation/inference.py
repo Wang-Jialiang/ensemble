@@ -93,11 +93,6 @@ def _infer_models_on_batch_multi_gpu(
     return torch.cat(batch_res, dim=0)  # [num_models, batch_size, num_classes]
 
 
-def _infer_models_on_batch(models, x):
-    """单批次多模型推理核心 (保留兼容性)"""
-    return _infer_models_on_batch_multi_gpu(models, x.cpu())
-
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 特征提取 (用于 CKA 计算)                                                      ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -107,11 +102,37 @@ class _FeatureExtractor:
     """通用特征提取器 - 使用 Hook 机制，支持任意模型架构
 
     自动定位模型倒数第二层（分类器前的特征层），提取隐藏层表示。
-    支持 ResNet、VGG、EfficientNet 等常见架构。
+    支持 ResNet、VGG、EfficientNet、MobileNet 等常见架构。
+
+    Args:
+        model: 目标模型
+        layer_name: 可选，手动指定要提取特征的层名（如 'avgpool', 'features.28'）
     """
 
-    def __init__(self, model: nn.Module):
+    # 支持的池化层类型（按优先级排序）
+    _POOL_TYPES = (
+        nn.AdaptiveAvgPool2d,
+        nn.AdaptiveMaxPool2d,
+        nn.AvgPool2d,
+        nn.MaxPool2d,
+    )
+
+    # 应该跳过的层类型（不适合作为特征层）
+    _SKIP_TYPES = (
+        nn.Linear,
+        nn.Dropout,
+        nn.BatchNorm1d,
+        nn.ReLU,
+        nn.LeakyReLU,
+        nn.GELU,
+        nn.Sigmoid,
+        nn.Softmax,
+        nn.Flatten,
+    )
+
+    def __init__(self, model: nn.Module, layer_name: Optional[str] = None):
         self.model = model
+        self.layer_name = layer_name
         self.features: Optional[torch.Tensor] = None
         self._hook: Optional[torch.utils.hooks.RemovableHandle] = None
         self._register_hook()
@@ -119,20 +140,46 @@ class _FeatureExtractor:
     def _find_penultimate_layer(self) -> nn.Module:
         """自动定位倒数第二层 (分类器前的特征层)
 
-        策略：
-        1. 优先查找 AdaptiveAvgPool2d (ResNet/EfficientNet 风格)
-        2. 若未找到，回退到最后一个非 Linear 模块
+        策略优先级：
+        1. 用户手动指定的层名
+        2. 池化层（AdaptiveAvgPool2d > AdaptiveMaxPool2d > AvgPool2d > MaxPool2d）
+        3. 最后一个卷积层（Conv2d）
+        4. 最后一个有意义的非分类器模块
         """
+        # 策略 1: 用户手动指定
+        if self.layer_name is not None:
+            for name, module in self.model.named_modules():
+                if name == self.layer_name:
+                    return module
+            raise ValueError(f"未找到指定的层: {self.layer_name}")
+
         last_pool = None
-        last_non_linear = None
+        last_conv = None
+        last_valid = None
 
         for name, module in self.model.named_modules():
-            if isinstance(module, nn.AdaptiveAvgPool2d):
+            # 策略 2: 查找池化层
+            if isinstance(module, self._POOL_TYPES):
                 last_pool = module
-            if not isinstance(module, (nn.Linear, nn.Dropout)):
-                last_non_linear = module
 
-        return last_pool if last_pool is not None else last_non_linear
+            # 策略 3: 查找卷积层
+            if isinstance(module, nn.Conv2d):
+                last_conv = module
+
+            # 策略 4: 查找任意有效层（排除分类器相关层）
+            if not isinstance(module, self._SKIP_TYPES) and name != "":
+                # 排除顶层容器
+                if not isinstance(
+                    module, (nn.Sequential, nn.ModuleList, nn.ModuleDict)
+                ):
+                    last_valid = module
+
+        # 按优先级返回
+        if last_pool is not None:
+            return last_pool
+        if last_conv is not None:
+            return last_conv
+        return last_valid
 
     def _register_hook(self):
         """注册前向 Hook"""

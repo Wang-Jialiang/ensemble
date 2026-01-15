@@ -30,15 +30,18 @@ class ModelDistanceCalculator:
         self.logger = get_logger()
 
     def compute(self, models: List[nn.Module]) -> np.ndarray:
-        """计算模型间的参数空间欧氏距离
+        """计算模型间的参数空间余弦距离
+
+        余弦距离 = 1 - 余弦相似度，对参数尺度不敏感，
+        更适合高维参数空间的比较。
 
         Args:
             models: 模型列表
 
         Returns:
-            distance_matrix: [n_models, n_models] 距离矩阵
+            distance_matrix: [n_models, n_models] 距离矩阵 (0~2)
         """
-        self.logger.info("📈 正在计算模型间参数距离...")
+        self.logger.info("📈 正在计算模型间参数距离 (余弦距离)...")
 
         n_models = len(models)
         distance_matrix = np.zeros((n_models, n_models))
@@ -51,10 +54,15 @@ class ModelDistanceCalculator:
             ).numpy()
             flat_params.append(params)
 
-        # 计算成对距离
+        # 计算成对余弦距离
         for i in range(n_models):
             for j in range(i + 1, n_models):
-                dist = np.linalg.norm(flat_params[i] - flat_params[j])
+                # 余弦相似度
+                cos_sim = np.dot(flat_params[i], flat_params[j]) / (
+                    np.linalg.norm(flat_params[i]) * np.linalg.norm(flat_params[j])
+                )
+                # 余弦距离 = 1 - 余弦相似度
+                dist = 1 - cos_sim
                 distance_matrix[i, j] = dist
                 distance_matrix[j, i] = dist
 

@@ -46,10 +46,6 @@ class ReportGenerator:
         models, exp_name, test_loader, cfg, device, **datasets
     ) -> Dict[str, Any]:
         """通用模型评估方法 - 生命周期钩子模式"""
-        log = get_logger()
-        log.info(f"\n┌{'─' * 60}")
-        log.info(f"│ 📊 {exp_name}")
-        log.info(f"└{'─' * 60}")
         res = {"experiment_name": exp_name}
 
         # 1. 标准标准指标 (Acc, ECE, NLL)
@@ -416,8 +412,7 @@ class ReportGenerator:
         report_path = Path(save_dir) / "detailed_report.txt"
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report_content)
-        get_logger().info(f"\n✅ Detailed report saved to: {report_path}")
-        get_logger().info(f"✅ All results saved to: {save_dir}")
+        get_logger().info(f"\n✅ Results saved to: {save_dir}")
 
     @classmethod
     def evaluate_checkpoints(
@@ -509,6 +504,4 @@ class ReportGenerator:
 
         # 生成并保存文本报告
         cls._save_and_print(results, output_dir)
-
-        get_logger().info(f"\n✅ Complete! All reports saved to: {output_dir}")
         return results

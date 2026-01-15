@@ -149,12 +149,21 @@ class MetricsCalculator:
         return f
 
     def _get_per_class_stats(self, ens_preds, targets):
-        return [
-            100.0
-            * ((ens_preds == targets) & (targets == c)).sum().item()
-            / max(1, (targets == c).sum().item())
-            for c in range(self.num_classes)
-        ]
+        """计算每个类别的准确率
+
+        Returns:
+            List[float]: 每个类别的准确率 (%)，不存在的类别返回 -1.0
+        """
+        class_accs = []
+        for c in range(self.num_classes):
+            mask = targets == c
+            count = mask.sum().item()
+            if count == 0:
+                class_accs.append(-1.0)  # 标记不存在的类别
+            else:
+                correct = ((ens_preds == targets) & mask).sum().item()
+                class_accs.append(100.0 * correct / count)
+        return class_accs
 
     def _calc_gini(self, vals):
         """计算基尼系数"""
