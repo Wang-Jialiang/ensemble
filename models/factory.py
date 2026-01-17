@@ -21,13 +21,20 @@ MODEL_REGISTRY = {}
 
 
 def register_model(name: str):
-    """
-    模型注册装饰器
+    """模型注册装饰器。
 
-    使用方式:
-    @register_model('resnet18')
-    def resnet18(num_classes):
-        ...
+    将被装饰的函数注册到 MODEL_REGISTRY，便于通过名称创建模型。
+
+    Args:
+        name: 注册的模型名称。
+
+    Returns:
+        Callable: 装饰器函数。
+
+    Example:
+        >>> @register_model('resnet18')
+        ... def resnet18(num_classes):
+        ...     return ResNet(...)
     """
 
     def decorator(builder_fn):
@@ -77,13 +84,28 @@ def efficientnet_b0(num_classes: int):
 
 
 class ModelFactory:
-    """模型生产工厂 (大纲化)"""
+    """模型生产工厂。
+
+    提供统一的模型创建接口，支持通过名称创建已注册的模型。
+    """
 
     @staticmethod
     def create_model(
         name: str, num_classes: int = 10, init: Optional[str] = None
     ) -> nn.Module:
-        """核心生产线: 路由 -> 实例化 -> 初始化"""
+        """创建并初始化模型。
+
+        Args:
+            name: 模型名称，如 'resnet18', 'vgg16' 等。
+            num_classes: 分类类别数，默认为 10。
+            init: 初始化方法，如 'kaiming', 'xavier'，可选。
+
+        Returns:
+            nn.Module: 初始化后的模型实例。
+
+        Raises:
+            ValueError: 如果模型名称未注册。
+        """
         name = name.lower()
 
         # 1. 解析构建器
@@ -101,4 +123,9 @@ class ModelFactory:
 
     @staticmethod
     def get_supported_models() -> List[str]:
+        """获取所有已注册的模型名称列表。
+
+        Returns:
+            List[str]: 支持的模型名称列表。
+        """
         return list(MODEL_REGISTRY.keys())

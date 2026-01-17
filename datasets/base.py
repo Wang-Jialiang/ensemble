@@ -8,6 +8,7 @@
 
 import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 from ..utils import get_logger
 
@@ -49,8 +50,24 @@ class BasePreloadedDataset(Dataset):
         # 1. 设置运行时常量
         self._init_runtime_stats()
 
-        # 2. 调度执行数据加载
+        # 2. 设置数据增强 (仅训练集)
+        self._init_transforms()
+
+        # 3. 调度执行数据加载
         self._load_data()
+
+    def _init_transforms(self):
+        """初始化数据增强管道 (仅训练集使用)"""
+        if self.train:
+            self.transform = transforms.Compose(
+                [
+                    transforms.RandomCrop(self.IMAGE_SIZE, padding=4),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomRotation(degrees=15),
+                ]
+            )
+        else:
+            self.transform = None
 
     def _init_runtime_stats(self):
         """基于类属性初始化运行时张量"""
@@ -75,5 +92,10 @@ class BasePreloadedDataset(Dataset):
     def __getitem__(self, idx):
         """获取已标准化的图像和标签"""
         img = self.images[idx].float() / 255.0  # uint8 -> float [0-1]
+
+        # 数据增强 (仅训练集，在 Normalize 之前)
+        if self.transform is not None:
+            img = self.transform(img)
+
         img = (img - self._mean) / self._std  # 标准化
         return img, self.targets[idx]

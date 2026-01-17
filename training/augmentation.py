@@ -64,6 +64,9 @@ class _CloudMaskGenerator:
 
     def _generate_perlin_noise(self, scale: float) -> torch.Tensor:
         """生成Perlin噪声"""
+        # 防止 scale 为 0 导致除零错误
+        scale = max(scale, 1.0)
+
         noise = torch.zeros(self.h, self.w, device=self.device)
         amplitude = 1.0
         max_val = 0.0
@@ -134,9 +137,15 @@ def register_augmentation(name: str):
 
 
 class AugmentationMethod:
-    """数据增强方法基类
+    """数据增强方法基类。
 
     所有增强方法支持预计算 mask 池，训练时从池中随机选择。
+
+    Attributes:
+        device: 计算设备 (CPU/GPU)。
+        _pool_size: mask 池大小。
+        _masks: 预计算的 mask 列表。
+        _fill_value: 遮罩区域的填充值。
     """
 
     def __init__(
@@ -152,11 +161,14 @@ class AugmentationMethod:
 
     @staticmethod
     def _compute_fill_value(cfg, use_mean: bool = False) -> torch.Tensor:
-        """计算归一化后的填充值，返回各通道值
+        """计算归一化后的填充值。
 
         Args:
-            cfg: 配置对象
-            use_mean: 如果为 True，填充均值（归一化后为0）；否则填充黑色
+            cfg: 配置对象，包含 dataset_mean 和 dataset_std。
+            use_mean: 如果为 True，填充均值（归一化后为 0）；否则填充黑色。
+
+        Returns:
+            torch.Tensor: 形状为 [C, 1, 1] 的填充值张量。
         """
         if use_mean:
             # 均值在归一化后为 0
@@ -169,8 +181,23 @@ class AugmentationMethod:
             fill = (0.0 - mean) / std  # [C]
             return torch.tensor(fill, dtype=torch.float32).view(-1, 1, 1)  # [C, 1, 1]
 
+    def _clear_masks(self):
+        """清理旧的 mask 池并释放显存。"""
+        if self._masks:
+            del self._masks
+            self._masks = []
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     def precompute_masks(self, target_ratio: float):
-        """预计算 mask 池，子类必须实现"""
+        """预计算 mask 池。
+
+        Args:
+            target_ratio: 目标遮罩比例 (0.0-1.0)。
+
+        Raises:
+            NotImplementedError: 子类必须实现此方法。
+        """
         raise NotImplementedError
 
     def apply(
@@ -180,9 +207,21 @@ class AugmentationMethod:
         ratio: float,
         prob: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """应用增强方法（默认实现：单通道 mask + 分通道填充）
+        """应用增强方法。
 
-        子类如有特殊 mask 形状（如 PixelHaS），需覆盖此方法。
+        默认实现：单通道 mask + 分通道填充。子类如有特殊 mask 形状需覆盖此方法。
+
+        Args:
+            images: 输入图像，形状为 [B, C, H, W]。
+            targets: 目标标签。
+            ratio: 当前遮罩比例（未使用，由 precompute_masks 决定）。
+            prob: 应用增强的概率。
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: 增强后的图像和标签。
+
+        Raises:
+            RuntimeError: 如果未调用 precompute_masks()。
         """
         if random.random() > prob:
             return images, targets
@@ -231,9 +270,9 @@ class CutoutAugmentation(AugmentationMethod):
 
     def precompute_masks(self, target_ratio: float):
         """预计算 Cutout mask 池"""
+        self._clear_masks()  # 清理旧 mask，释放显存
         H, W = self.height, self.width
         size = int(H * np.sqrt(target_ratio))
-        self._masks = []
         for _ in range(self._pool_size):
             mask = torch.ones(1, 1, H, W, device=self.device)
             if size > 0:
@@ -273,8 +312,8 @@ class PixelHaSAugmentation(AugmentationMethod):
 
     def precompute_masks(self, target_ratio: float):
         """预计算 PixelHaS mask 池（单通道，每像素独立随机）"""
+        self._clear_masks()  # 清理旧 mask，释放显存
         H, W = self.height, self.width
-        self._masks = []
         for _ in range(self._pool_size):
             mask = (torch.rand((1, 1, H, W), device=self.device) > target_ratio).float()
             self._masks.append(mask)
@@ -317,8 +356,8 @@ class GridMaskAugmentation(AugmentationMethod):
 
     def precompute_masks(self, target_ratio: float):
         """预计算 GridMask mask 池"""
+        self._clear_masks()  # 清理旧 mask，释放显存
         H, W = self.height, self.width
-        self._masks = []
         for _ in range(self._pool_size):
             self._masks.append(self._generate_single_mask(H, W, target_ratio))
 
@@ -386,6 +425,7 @@ class PerlinMaskAugmentation(AugmentationMethod):
 
     def precompute_masks(self, target_ratio: float):
         """预计算 Perlin mask 池"""
+        self._clear_masks()  # 清理旧 mask，释放显存
         self._masks = self.mask_generator.generate_batch(self._pool_size, target_ratio)
 
 

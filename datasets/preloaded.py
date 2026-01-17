@@ -12,6 +12,7 @@ from typing import Dict, Type
 import numpy as np
 import torch
 import torchvision
+from torchvision import transforms
 from tqdm import tqdm
 
 from ..utils import get_logger
@@ -55,6 +56,19 @@ class PreloadedCIFAR10(BasePreloadedDataset):
     NUM_CLASSES = 10
     NUM_CHANNELS = 3
     NAME = "CIFAR-10"
+
+    def _init_transforms(self):
+        """CIFAR-10 数据增强: 保守策略"""
+        if self.train:
+            self.transform = transforms.Compose(
+                [
+                    transforms.RandomCrop(self.IMAGE_SIZE, padding=4),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomRotation(degrees=15),
+                ]
+            )
+        else:
+            self.transform = None
 
     def _load_data(self):
         """主加载流程"""
@@ -109,6 +123,20 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         self.test_split = test_split
         self.seed = seed
         super().__init__(root, train)
+
+    def _init_transforms(self):
+        """EuroSAT 数据增强: 遥感图像适用更激进的策略"""
+        if self.train:
+            self.transform = transforms.Compose(
+                [
+                    transforms.RandomCrop(self.IMAGE_SIZE, padding=4),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),  # 遥感图像可垂直翻转
+                    transforms.RandomRotation(degrees=90),  # 遥感图像可更大角度旋转
+                ]
+            )
+        else:
+            self.transform = None
 
     def _load_data(self):
         """主加载流程 (支持缓存加速)"""

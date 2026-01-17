@@ -159,7 +159,7 @@ class GradCAMAnalyzer:
         self.model_name = cfg.model_name
 
     def analyze_ensemble_quality(
-        self, workers: List, test_loader, num_samples: int = 50, image_size: int = 32
+        self, workers: List, test_loader, num_samples: int, image_size: int
     ) -> Dict[str, Any]:
         """分析集成模型的Grad-CAM多样性
 

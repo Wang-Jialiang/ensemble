@@ -46,12 +46,13 @@ def _init_config(args):
 
     base_cfg, experiments, eval_ckpts = Config.load_yaml(str(path))
 
-    # [New] 手动触发布局配置 (解耦合)
-    configure_dataset_params(base_cfg)
-
-    # 应用 quick_test 模式
+    # 应用 quick_test 模式 (必须在 configure_dataset_params 之前)
+    # 因为 apply_quick_test() 使用 replace() 会创建新对象，丢失 init=False 字段
     if args.quick_test:
         base_cfg = base_cfg.apply_quick_test()
+
+    # [New] 手动触发数据集配置 (解耦合)
+    configure_dataset_params(base_cfg)
 
     # 将实验列表挂载到配置对象上便于后续传递 (临时)
     base_cfg._experiments = experiments

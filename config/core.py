@@ -213,8 +213,19 @@ class Config:
         return self.warmup_epochs + self.progressive_epochs + self.finetune_epochs
 
     def copy(self, **kwargs) -> "Config":
-        """克隆配置并可选地覆盖参数"""
-        return replace(self, **kwargs)
+        """克隆配置并可选地覆盖参数
+
+        注意: replace() 不会复制 init=False 的字段，需要手动复制
+        """
+        new_cfg = replace(self, **kwargs)
+        # 手动复制 init=False 的字段
+        new_cfg.num_classes = self.num_classes
+        new_cfg.image_size = self.image_size
+        new_cfg.num_channels = self.num_channels
+        new_cfg.dataset_mean = self.dataset_mean.copy() if self.dataset_mean else []
+        new_cfg.dataset_std = self.dataset_std.copy() if self.dataset_std else []
+        new_cfg.gpu_ids = self.gpu_ids.copy() if self.gpu_ids else []
+        return new_cfg
 
     def apply_quick_test(self) -> "Config":
         """应用快速测试模式"""
@@ -257,11 +268,58 @@ class Config:
 
         return cfg, exps, eval_ckpts
 
+    # 自动计算字段 (无需验证)
+    _AUTO_FIELDS = {
+        "save_dir",
+        "training_base_dir",
+        "evaluation_dir",
+        "num_classes",
+        "image_size",
+        "num_channels",
+        "dataset_mean",
+        "dataset_std",
+        "gpu_ids",
+        "experiment_name",
+    }
+
+    # 允许为 None 的可选字段
+    _OPTIONAL_FIELDS = {
+        "adv_eps_list",  # 多 ε 评估列表，可选功能
+    }
+
+    def _validate_fields(self) -> None:
+        """验证所有配置字段都已被正确赋值"""
+        from dataclasses import fields
+
+        missing = []
+        for f in fields(self):
+            # 跳过自动计算字段和可选字段
+            if f.name in self._AUTO_FIELDS or f.name in self._OPTIONAL_FIELDS:
+                continue
+            # 跳过嵌套配置对象
+            if f.name == "generation":
+                continue
+
+            value = getattr(self, f.name)
+            if value is None:
+                missing.append(f.name)
+
+        if missing:
+            raise ValueError(
+                f"❌ 配置验证失败: 以下必填字段未设置\n"
+                f"   缺失字段: {', '.join(missing)}\n"
+                f"   请检查 YAML 配置文件是否包含所有必要配置项"
+            )
+
     def __post_init__(self) -> None:
         """配置校验与派生字段注入"""
+        # 1. 验证所有字段都已赋值
+        self._validate_fields()
+
+        # 2. 硬件资源探测
         self._setup_hardware()
 
-        # 自动生成实验目录路径 (按阶段分离，但不立即创建)
+        # 3. 自动生成实验目录路径 (按阶段分离，但不立即创建)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         exp_name = self.experiment_name or "exp"
 

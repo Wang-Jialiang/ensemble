@@ -18,16 +18,20 @@ from .strategies import ENSEMBLE_STRATEGIES, EnsembleFn
 
 
 class MetricsCalculator:
-    """集成模型指标计算器
+    """集成模型指标计算器。
 
-    计算各种评估指标：
-    - 准确率：集成/个体/Oracle/Top-5
-    - 校准：ECE、NLL
-    - 多样性：分歧度、多样性
-    - 公平性：平衡准确率、基尼系数
+    计算各种评估指标，包括：
+        - 准确率：集成/个体/Oracle/Top-5
+        - 校准：ECE、NLL
+        - 多样性：分歧度、JS 散度、CKA
+        - 公平性：平衡准确率、基尼系数、EOD
+
+    Attributes:
+        num_classes: 分类任务的类别数量。
+        ece_metric: 用于计算校准误差的 torchmetrics 实例。
     """
 
-    def __init__(self, num_classes: int, ece_n_bins: int = 15):
+    def __init__(self, num_classes: int, ece_n_bins: int):
         from torchmetrics.classification import CalibrationError
 
         self.num_classes = num_classes
@@ -42,13 +46,17 @@ class MetricsCalculator:
         ensemble_fn: EnsembleFn = None,
         all_features: torch.Tensor = None,
     ) -> dict:
-        """核心指标调度中心 (大纲化)
+        """计算所有评估指标。
 
         Args:
-            all_logits: [num_models, num_samples, num_classes]
-            targets: [num_samples]
-            ensemble_fn: 集成策略函数
-            all_features: [num_models, num_samples, feature_dim] 用于 CKA 计算
+            all_logits: 所有模型的 logits，形状为 [num_models, num_samples, num_classes]。
+            targets: 真实标签，形状为 [num_samples]。
+            ensemble_fn: 集成策略函数，默认使用均值聚合。
+            all_features: 特征向量，形状为 [num_models, num_samples, feature_dim]，
+                用于 CKA 计算，若为 None 则回退到 logits。
+
+        Returns:
+            dict: 包含所有计算指标的字典。
         """
         m = {}
         ens_logits = (ensemble_fn or ENSEMBLE_STRATEGIES["mean"])(all_logits)
@@ -65,7 +73,16 @@ class MetricsCalculator:
         return m
 
     def _calc_base_performance(self, ens_logits, targets, all_logits):
-        """计算集成/个体准确率与 NLL/ECE"""
+        """计算基础性能指标。
+
+        Args:
+            ens_logits: 集成后的 logits，形状为 [num_samples, num_classes]。
+            targets: 真实标签。
+            all_logits: 所有模型的 logits。
+
+        Returns:
+            dict: 包含 ensemble_acc、nll、ece、avg_individual_acc、oracle_acc。
+        """
         ens_preds = ens_logits.argmax(1)
         all_preds = all_logits.argmax(2)
         indiv_accs = (all_preds == targets).float().mean(1) * 100.0
@@ -79,11 +96,16 @@ class MetricsCalculator:
         }
 
     def _calc_diversity(self, all_logits, all_features=None):
-        """计算预测多样性: Disagreement + JS散度 + CKA
+        """计算预测多样性指标。
+
+        包含 Disagreement（硬不一致性）、JS 散度（软不一致性）和 CKA（表示层多样性）。
 
         Args:
-            all_logits: [num_models, num_samples, num_classes]
-            all_features: [num_models, num_samples, feature_dim] 用于 CKA，若为 None 则回退到 logits
+            all_logits: 所有模型的 logits，形状为 [num_models, num_samples, num_classes]。
+            all_features: 特征向量，若为 None 则使用 logits 计算 CKA。
+
+        Returns:
+            dict: 包含 disagreement、js_divergence、avg_cka、min_cka、max_cka。
         """
         num_m = all_logits.shape[0]
         all_preds = all_logits.argmax(2)

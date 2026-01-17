@@ -338,9 +338,12 @@ def _get_dataset_norm(name, device):
         raise ValueError(
             f"不支持的数据集: {name}. 可用: {list(DATASET_REGISTRY.keys())}"
         )
-    return torch.tensor(cls.MEAN).view(1, 3, 1, 1).to(device), torch.tensor(
-        cls.STD
-    ).view(1, 3, 1, 1).to(device)
+    # 动态获取通道数，支持灰度图像等非 RGB 数据集
+    num_channels = len(cls.MEAN)
+    return (
+        torch.tensor(cls.MEAN).view(1, num_channels, 1, 1).to(device),
+        torch.tensor(cls.STD).view(1, num_channels, 1, 1).to(device),
+    )
 
 
 def _generate_target_labels(

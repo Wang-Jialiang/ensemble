@@ -63,6 +63,10 @@ class ReportGenerator:
             ReportGenerator._run_analysis_eval(models, cfg, test_loader, **datasets)
         )
 
+        # 4. 参数空间多样性 (Loss Landscape)
+        if datasets.get("run_loss_landscape", False):
+            res.update(ReportGenerator._run_landscape_eval(models))
+
         return res
 
     @staticmethod
@@ -104,7 +108,7 @@ class ReportGenerator:
             )
 
         if ds.get("run_gradcam", False):
-            get_logger().info("  └─ 🔍 Grad-CAM analysis")
+            get_logger().info("  ├─ 🔍 Grad-CAM analysis")
             a["gradcam_metrics"] = GradCAMAnalyzer(cfg).analyze_ensemble_quality(
                 [ModelListWrapper(models)],
                 loader,
@@ -112,6 +116,11 @@ class ReportGenerator:
                 cfg.image_size,
             )
         return a
+
+    @staticmethod
+    def _run_landscape_eval(models):
+        get_logger().info("  └─ 📐 Parameter space diversity")
+        return ModelDistanceCalculator().compute(models)
 
     @staticmethod
     def _get_rank_marker(
@@ -224,20 +233,25 @@ class ReportGenerator:
 
         # 3. 多样性 (disagreement↑高好, js_div↑高好, avg_cka↓低好表示更多样)
         lines.append("\n🔀 多样性 (Diversity)")
-        lines.append("-" * 90)
+        lines.append("-" * 130)
         lines.append(
-            f"{'Experiment':<25} | {'disagreement↑':<16} | {'js_divergence↑':<16} | {'avg_cka↓':<16}"
+            f"{'Experiment':<25} | {'disagreement↑':<16} | {'js_divergence↑':<16} | "
+            f"{'avg_cka↓':<12} | {'min_cka↓':<12} | {'max_cka↓':<12}"
         )
-        lines.append("-" * 90)
+        lines.append("-" * 130)
         dis_vals = get_std_vals("disagreement")
         js_vals = get_std_vals("js_divergence")
         cka_vals = get_std_vals("avg_cka")
+        min_cka_vals = get_std_vals("min_cka")
+        max_cka_vals = get_std_vals("max_cka")
         for n in exps:
             m = results[n].get("standard_metrics", {})
             lines.append(
                 f"{n:<25} | {cls._format_val(m.get('disagreement', 0), dis_vals, True):<16} | "
                 f"{cls._format_val(m.get('js_divergence', 0), js_vals, True):<16} | "
-                f"{cls._format_val(m.get('avg_cka', 0), cka_vals, False):<16}"
+                f"{cls._format_val(m.get('avg_cka', 0), cka_vals, False):<12} | "
+                f"{cls._format_val(m.get('min_cka', 0), min_cka_vals, False):<12} | "
+                f"{cls._format_val(m.get('max_cka', 0), max_cka_vals, False):<12}"
             )
 
         # 4. 公平性
@@ -292,6 +306,16 @@ class ReportGenerator:
                 list((first_corr.get("by_severity") or {}).keys()), key=lambda x: int(x)
             )
             if severities:
+                # 收集每个 severity 的所有实验值用于排名
+                sev_vals = {
+                    s: [
+                        (results[n].get("corruption_results") or {})
+                        .get("by_severity", {})
+                        .get(s, 0)
+                        for n in exps
+                    ]
+                    for s in severities
+                }
                 lines.append(
                     f"\nBy Severity: {' | '.join([f'Sev_{s}↑' for s in severities])}"
                 )
@@ -300,12 +324,27 @@ class ReportGenerator:
                     by_sev = corr.get("by_severity") or {}
                     lines.append(
                         f"{n:<25} | "
-                        + " | ".join([f"{by_sev.get(s, 0):.4f}" for s in severities])
+                        + " | ".join(
+                            [
+                                cls._format_val(by_sev.get(s, 0), sev_vals[s], True)
+                                for s in severities
+                            ]
+                        )
                     )
 
             # by_category
             categories = list((first_corr.get("by_category") or {}).keys())
             if categories:
+                # 收集每个 category 的所有实验值用于排名
+                cat_vals = {
+                    c: [
+                        (results[n].get("corruption_results") or {})
+                        .get("by_category", {})
+                        .get(c, 0)
+                        for n in exps
+                    ]
+                    for c in categories
+                }
                 lines.append(
                     f"\nBy Category: {' | '.join([f'{c}↑' for c in categories])}"
                 )
@@ -314,45 +353,58 @@ class ReportGenerator:
                     by_cat = corr.get("by_category") or {}
                     lines.append(
                         f"{n:<25} | "
-                        + " | ".join([f"{by_cat.get(c, 0):.4f}" for c in categories])
+                        + " | ".join(
+                            [
+                                cls._format_val(by_cat.get(c, 0), cat_vals[c], True)
+                                for c in categories
+                            ]
+                        )
                     )
 
         # 6. OOD 鲁棒性 (AUROC↑高好, FPR95↓低好)
         has_ood = any(results[n].get("ood_results") for n in exps)
         if has_ood:
             lines.append("\n🔮 OOD鲁棒性 (OOD Robustness)")
-            lines.append("-" * 120)
+            lines.append("-" * 160)
             lines.append(
-                f"{'Experiment':<25} | {'auroc_msp↑':<16} | {'auroc_entropy↑':<18} | "
-                f"{'fpr95_msp↓':<16} | {'fpr95_entropy↓':<18}"
+                f"{'Experiment':<25} | {'auroc_msp↑':<14} | {'auroc_energy↑':<16} | {'auroc_mahal↑':<14} | "
+                f"{'fpr95_msp↓':<14} | {'fpr95_energy↓':<16} | {'fpr95_mahal↓':<14}"
             )
-            lines.append("-" * 120)
+            lines.append("-" * 160)
             auroc_msp = get_ood_vals("ood_auroc_msp")
-            auroc_ent = get_ood_vals("ood_auroc_entropy")
+            auroc_energy = get_ood_vals("ood_auroc_energy")
+            auroc_mahal = get_ood_vals("ood_auroc_mahalanobis")
             fpr_msp = get_ood_vals("ood_fpr95_msp")
-            fpr_ent = get_ood_vals("ood_fpr95_entropy")
+            fpr_energy = get_ood_vals("ood_fpr95_energy")
+            fpr_mahal = get_ood_vals("ood_fpr95_mahalanobis")
             for n in exps:
                 ood = results[n].get("ood_results") or {}
                 lines.append(
-                    f"{n:<25} | {cls._format_val(ood.get('ood_auroc_msp', 0), auroc_msp, True):<16} | "
-                    f"{cls._format_val(ood.get('ood_auroc_entropy', 0), auroc_ent, True):<18} | "
-                    f"{cls._format_val(ood.get('ood_fpr95_msp', 0), fpr_msp, False):<16} | "
-                    f"{cls._format_val(ood.get('ood_fpr95_entropy', 0), fpr_ent, False):<18}"
+                    f"{n:<25} | {cls._format_val(ood.get('ood_auroc_msp', 0), auroc_msp, True):<14} | "
+                    f"{cls._format_val(ood.get('ood_auroc_energy', 0), auroc_energy, True):<16} | "
+                    f"{cls._format_val(ood.get('ood_auroc_mahalanobis', 0), auroc_mahal, True):<14} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_msp', 0), fpr_msp, False):<14} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_energy', 0), fpr_energy, False):<16} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_mahalanobis', 0), fpr_mahal, False):<14}"
                 )
 
         # 7. Adversarial 鲁棒性 (↑ 高好)
         has_adv = any(results[n].get("adversarial_results") for n in exps)
         if has_adv:
             lines.append("\n⚔️ Adversarial鲁棒性 (Adversarial Robustness)")
-            lines.append("-" * 70)
-            lines.append(f"{'Experiment':<25} | {'fgsm_acc↑':<16} | {'pgd_acc↑':<16}")
-            lines.append("-" * 70)
+            lines.append("-" * 90)
+            lines.append(
+                f"{'Experiment':<25} | {'clean_acc↑':<16} | {'fgsm_acc↑':<16} | {'pgd_acc↑':<16}"
+            )
+            lines.append("-" * 90)
+            clean_vals = get_adv_vals("clean_acc")
             fgsm_vals = get_adv_vals("fgsm_acc")
             pgd_vals = get_adv_vals("pgd_acc")
             for n in exps:
                 adv = results[n].get("adversarial_results") or {}
                 lines.append(
-                    f"{n:<25} | {cls._format_val(adv.get('fgsm_acc', 0), fgsm_vals, True):<16} | "
+                    f"{n:<25} | {cls._format_val(adv.get('clean_acc', 0), clean_vals, True):<16} | "
+                    f"{cls._format_val(adv.get('fgsm_acc', 0), fgsm_vals, True):<16} | "
                     f"{cls._format_val(adv.get('pgd_acc', 0), pgd_vals, True):<16}"
                 )
 
@@ -436,7 +488,6 @@ class ReportGenerator:
         output_dir = cfg.evaluation_dir
         ensure_dir(output_dir)
         results = {}
-        all_models = {}  # 收集所有实验的模型用于 Loss Landscape
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         for idx, ckpt_path in enumerate(checkpoint_paths, 1):
@@ -451,7 +502,6 @@ class ReportGenerator:
             exp_name = ctx["name"]
             # context 中的 models 已经被 CheckpointLoader 分配到了各个 GPU (如果可用)
             models = ctx["models"]
-            all_models[exp_name] = models  # 保存用于后续分析
 
             # 使用通用评估方法
             result = cls._evaluate_models(
@@ -464,43 +514,9 @@ class ReportGenerator:
                 ood_dataset=ood_dataset,
                 run_gradcam=run_gradcam,
                 run_adversarial=run_adversarial,
+                run_loss_landscape=run_loss_landscape,
             )
             results[exp_name] = result
-
-        # 模型距离计算
-        if run_loss_landscape and all_models:
-            get_logger().info("\n📐 Computing model distances...")
-            distance_calc = ModelDistanceCalculator()
-
-            for exp_name, models in all_models.items():
-                dist_matrix = distance_calc.compute(models)
-                results[exp_name]["distance_matrix"] = dist_matrix
-
-                # 计算衍生指标并保存到 results
-                n = len(dist_matrix)
-                if n > 1:
-                    import math
-
-                    distances = [
-                        dist_matrix[i][j] for i in range(n) for j in range(i + 1, n)
-                    ]
-                    count = len(distances)
-                    avg_dist = sum(distances) / count if count > 0 else 0
-                    results[exp_name]["avg_distance"] = avg_dist
-
-                    if count > 1:
-                        variance = sum((d - avg_dist) ** 2 for d in distances) / count
-                        std_dist = math.sqrt(variance)
-                    else:
-                        std_dist = 0
-                    results[exp_name]["std_distance"] = std_dist
-
-                    if avg_dist > 0:
-                        results[exp_name]["direction_diversity"] = min(
-                            std_dist / avg_dist, 1.0
-                        )
-                    else:
-                        results[exp_name]["direction_diversity"] = 0
 
         # 生成并保存文本报告
         cls._save_and_print(results, output_dir)

@@ -96,4 +96,10 @@ def evaluate_corruption(
         by_category[cat_name] = np.mean(cat_accs) if cat_accs else 0.0
     results["by_category"] = by_category
 
+    # 3. 全局平均 (所有 severity 和 corruption 的总平均)
+    all_accs = [
+        acc for sev_results in detail_results.values() for acc in sev_results.values()
+    ]
+    results["overall_avg"] = np.mean(all_accs) if all_accs else 0.0
+
     return results
