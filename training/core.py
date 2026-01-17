@@ -278,6 +278,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             TaskProgressColumn(),
             TimeRemainingColumn(),
             console=console,
+            transient=True,  # 完成后自动消失
         ) as progress:
             desc = f"Epoch {epoch + 1:3d}"
             if is_warmup_single_model:
@@ -533,6 +534,5 @@ def train_experiment(
     trainer.load_checkpoint("best")
 
     get_logger().info(f"✅ Training completed: {cfg.experiment_name}")
-    get_logger().info(f"   Checkpoint saved to: {Path(cfg.save_dir) / 'checkpoints'}")
 
     return trainer, trainer.total_training_time

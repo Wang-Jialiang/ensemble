@@ -170,27 +170,27 @@ experiments:
     augmentation_method: "cutout"
     use_curriculum: false
 
-  # # ============================================================================
-  # # GridMask 网格遮挡
-  # # ============================================================================
-  # - name: "Exp05_GridMask_Curriculum"
-  #   augmentation_method: "gridmask"
-  #   use_curriculum: true
+  # ============================================================================
+  # GridMask 网格遮挡
+  # ============================================================================
+  - name: "Exp05_GridMask_Curriculum"
+    augmentation_method: "gridmask"
+    use_curriculum: true
 
-  # - name: "Exp06_GridMask_Fixed"
-  #   augmentation_method: "gridmask"
-  #   use_curriculum: false
+  - name: "Exp06_GridMask_Fixed"
+    augmentation_method: "gridmask"
+    use_curriculum: false
 
-  # # ============================================================================
-  # # 像素级 Hide-and-Seek
-  # # ============================================================================
-  # - name: "Exp07_PixelHaS_Curriculum"
-  #   augmentation_method: "pixel_has"
-  #   use_curriculum: true
+  # ============================================================================
+  # 像素级 Hide-and-Seek
+  # ============================================================================
+  - name: "Exp07_PixelHaS_Curriculum"
+    augmentation_method: "pixel_has"
+    use_curriculum: true
 
-  # - name: "Exp08_PixelHaS_Fixed"
-  #   augmentation_method: "pixel_has"
-  #   use_curriculum: false
+  - name: "Exp08_PixelHaS_Fixed"
+    augmentation_method: "pixel_has"
+    use_curriculum: false
 
   # ============================================================================
   # Baseline (无增强)
@@ -215,10 +215,10 @@ eval_checkpoints:
   - "Exp02_Perlin_Fixed"
   - "Exp03_Cutout_Curriculum"
   - "Exp04_Cutout_Fixed"
-  # - "Exp05_GridMask_Curriculum"
-  # - "Exp06_GridMask_Fixed"
-  # - "Exp07_PixelHaS_Curriculum"
-  # - "Exp08_PixelHaS_Fixed"
+  - "Exp05_GridMask_Curriculum"
+  - "Exp06_GridMask_Fixed"
+  - "Exp07_PixelHaS_Curriculum"
+  - "Exp08_PixelHaS_Fixed"
   - "Exp09_Baseline"
 
 # ==============================================================================

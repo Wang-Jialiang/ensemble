@@ -15,7 +15,7 @@ from torch.amp import autocast
 
 from ..config import Config
 from ..models import ModelFactory
-from ..utils import ensure_dir, get_logger
+from ..utils import ensure_dir
 from .augmentation import AUGMENTATION_REGISTRY
 from .optimization import create_optimizer, create_scheduler
 
@@ -251,8 +251,6 @@ class HistorySaver:
             writer = csv.DictWriter(f, fieldnames=history.keys())
             writer.writeheader()
             self._write_rows(writer, history)
-
-        get_logger().info(f"💾 History saved: {path}")
 
     def _write_rows(self, writer, history):
         """遍历并写入行数据"""

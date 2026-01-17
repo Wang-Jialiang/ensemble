@@ -84,9 +84,6 @@ class PreloadedCIFAR10(BasePreloadedDataset):
 
     def _ingest_source_data(self, source_ds):
         """将源数据集的 image/targets 转移到 Tensor 形式"""
-        get_logger().info(
-            f"📦 Preloading {self.NAME} {'train' if self.train else 'test'} to RAM"
-        )
         # (N, H, W, 3) -> (N, 3, H, W)
         self.images = torch.from_numpy(source_ds.data).permute(0, 3, 1, 2)
         self.targets = torch.tensor(source_ds.targets, dtype=torch.long)
