@@ -392,8 +392,4 @@ def _summarize_adv_results(s, eps, alpha, steps, log):
         "fgsm_acc": 100 * s["fgsm"] / t,
         "pgd_acc": 100 * s["pgd"] / t,
     }
-    log.info(
-        f"  ε={eps * 255:.0f}/255 | Clean: {res['clean_acc']:.2f}% | "
-        f"FGSM: {res['fgsm_acc']:.2f}% | PGD: {res['pgd_acc']:.2f}%"
-    )
     return res

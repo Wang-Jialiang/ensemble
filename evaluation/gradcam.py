@@ -357,7 +357,6 @@ class GradCAMAnalyzer:
             save_path = f"{save_dir}/sample_{i}_gradcam.png"
             plt.savefig(save_path, dpi=self.cfg.plot_dpi, bbox_inches="tight")
             plt.close()
-            get_logger().info(f"    Saved Grad-CAM vis to: {save_path}")
 
 
 class ModelListWrapper:
