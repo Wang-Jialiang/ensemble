@@ -420,7 +420,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
         if stats["val_acc"] > self._best_val_acc:
             self._best_val_acc = stats["val_acc"]
             self._save_checkpoint("best")
-            self.logger.info(f"   🏆 New Best Acc: {stats['val_acc']:.2f}%")
 
         # 3. 打印汇总日志
         self._log_epoch_summary(epoch, stats)

@@ -267,10 +267,6 @@ def evaluate_ood(
         ),
     }
 
-    log.info(
-        f"  ✅ MSP AUROC: {res['ood_auroc_msp']:.2f}%, Energy AUROC: {res['ood_auroc_energy']:.2f}%, Mahalanobis AUROC: {res['ood_auroc_mahalanobis']:.2f}%"
-    )
-
     return res
 
 

@@ -207,7 +207,7 @@ experiments:
 # ==============================================================================
 # 只需修改此时间戳，所有检查点路径自动更新
 # 路径格式: ./output/training/{training_timestamp}/{exp_name}/checkpoints/best
-training_timestamp: "20260112_015916"  # 修改这里即可
+training_timestamp: "20260117_200031"  # 修改这里即可
 
 # 实验列表 (路径由代码自动拼接)
 eval_checkpoints:
