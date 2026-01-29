@@ -126,10 +126,10 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         if self.train:
             self.transform = transforms.Compose(
                 [
-                    transforms.RandomCrop(self.IMAGE_SIZE, padding=4),
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    transforms.RandomVerticalFlip(p=0.5),  # 遥感图像可垂直翻转
-                    transforms.RandomRotation(degrees=90),  # 遥感图像可更大角度旋转
+                    # transforms.RandomCrop(self.IMAGE_SIZE, padding=4),
+                    # transforms.RandomHorizontalFlip(p=0.5),
+                    # transforms.RandomVerticalFlip(p=0.5),  # 遥感图像可垂直翻转
+                    # transforms.RandomRotation(degrees=90),  # 遥感图像可更大角度旋转
                 ]
             )
         else:

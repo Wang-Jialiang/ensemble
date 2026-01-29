@@ -80,10 +80,11 @@ class Config:
     mask_pool_size: Optional[int] = None  # 预生成的 Mask 池大小
     mask_start_ratio: Optional[float] = None  # Progressive 阶段起始遮罩比例
     mask_end_ratio: Optional[float] = None  # Progressive 阶段结束遮罩比例
-    mask_prob_start: Optional[float] = None  # Progressive 阶段起始应用概率
-    mask_prob_end: Optional[float] = None  # Progressive 阶段结束应用概率
     finetune_mask_ratio: Optional[float] = None  # Finetune 阶段固定遮罩比例
-    finetune_mask_prob: Optional[float] = None  # Finetune 阶段固定应用概率
+
+    # [统一概率增长策略] 与三阶段共用 warmup/progressive/finetune_epochs
+    mask_start_prob: Optional[float] = None  # Progressive 阶段起始概率
+    mask_end_prob: Optional[float] = None  # Progressive/Finetune 阶段最终概率
 
     # ==========================================================================
     # [全局] 数据加载配置 - 被 StagedEnsembleTrainer 使用
@@ -138,7 +139,8 @@ class Config:
     # [增强专用] 数据增强参数 - Perlin/Cutout/GridMask 使用
     # ==========================================================================
     perlin_persistence: Optional[float] = None  # Perlin 噪声持久度 (默认 0.5)
-    perlin_scale_ratio: Optional[float] = None  # Perlin 噪声尺度比例 (默认 0.3)
+    perlin_scale_ratio_min: Optional[float] = None  # Perlin 噪声尺度比例下界 (默认 0.2)
+    perlin_scale_ratio_max: Optional[float] = None  # Perlin 噪声尺度比例上界 (默认 0.3)
     gridmask_d_ratio_min: Optional[float] = (
         None  # GridMask 网格单元最小尺寸比例 (默认 0.2)
     )
@@ -146,6 +148,12 @@ class Config:
         None  # GridMask 网格单元最大尺寸比例 (默认 0.4)
     )
     perlin_octaves: Optional[int] = None  # Perlin octaves 数量 (默认 4)
+    gridded_perlin_grid_size: Optional[int] = (
+        None  # Gridded Perlin 网格大小 (值越大云块越分散)
+    )
+    gridded_perlin_cloud_ratio: Optional[float] = (
+        None  # 每个网格内云块占比 (值越大云块越大)
+    )
     augmentation_use_mean_fill: Optional[bool] = None  # 遮挡填充: False=黑色, True=均值
 
     # ==========================================================================
@@ -172,7 +180,7 @@ class Config:
     augmentation_method: Optional[str] = None  # 增强方法: "perlin", "cutout", "none" 等
     use_curriculum: Optional[bool] = None  # 是否使用课程学习
     fixed_ratio: Optional[float] = None  # 固定遮挡比例 (仅 use_curriculum=False 时生效)
-    fixed_prob: Optional[float] = None  # 固定遮挡概率 (仅 use_curriculum=False 时生效)
+    # fixed_prob 已移除，统一使用 mask_start_prob 和 mask_end_prob
     share_warmup_backbone: Optional[bool] = None  # 是否在 warmup 后共享 backbone
 
     # ==========================================================================
@@ -349,7 +357,8 @@ class Experiment:
     augmentation_method: str = "perlin"
     use_curriculum: bool = True
     fixed_ratio: Optional[float] = None
-    fixed_prob: Optional[float] = None
+    # fixed_prob 已移除，统一使用 mask_start_prob 和 mask_end_prob
+    share_warmup_backbone: Optional[bool] = None
 
     def get_config_overrides(self) -> dict:
         """获取所有需要覆盖的参数 (过滤 name 和 None 值)"""

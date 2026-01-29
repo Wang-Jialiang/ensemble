@@ -159,9 +159,21 @@ class GradCAMAnalyzer:
         self.model_name = cfg.model_name
 
     def analyze_ensemble_quality(
-        self, workers: List, test_loader, num_samples: int, image_size: int
+        self,
+        workers: List,
+        test_loader,
+        num_samples: int,
+        image_size: int,
+        exp_name: str = "",
     ) -> Dict[str, Any]:
         """分析集成模型的Grad-CAM多样性
+
+        Args:
+            workers: 模型工作器列表
+            test_loader: 测试数据加载器
+            num_samples: 分析样本数
+            image_size: 图像尺寸
+            exp_name: 实验名称，用于区分不同实验的保存目录
 
         Returns:
             metrics: 包含per_model和overall指标的字典
@@ -214,9 +226,12 @@ class GradCAMAnalyzer:
         # 计算指标
         metrics = self._compute_diversity_metrics(all_cams, all_preds, labels)
 
-        # 可视化并保存
+        # 可视化并保存 (为每个实验创建独立目录，避免覆盖)
         eval_dir = self.cfg.evaluation_dir
-        vis_dir = f"{eval_dir}/gradcam"
+        if exp_name:
+            vis_dir = f"{eval_dir}/gradcam/{exp_name}"
+        else:
+            vis_dir = f"{eval_dir}/gradcam"
         self._visualize_and_save(samples, labels, all_cams, all_preds, vis_dir)
 
         return metrics

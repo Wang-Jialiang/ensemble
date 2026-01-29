@@ -79,7 +79,6 @@ class StagedEnsembleTrainer(CheckpointMixin):
         augmentation_method="perlin",
         use_curriculum=True,
         fixed_ratio=0.25,
-        fixed_prob=0.5,
         share_warmup_backbone=False,
     ):
         """三阶段集成训练器构造函数 (大纲化)"""
@@ -90,7 +89,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
         # 1. 初始化属性与增强策略
         self.augmentation_method = augmentation_method
         self.use_curriculum = use_curriculum
-        self.fixed_ratio, self.fixed_prob = fixed_ratio, fixed_prob
+        self.fixed_ratio = fixed_ratio
         self.share_warmup_backbone = share_warmup_backbone
 
         # 2. 硬件与日志初始化
@@ -171,7 +170,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
             metrics={"val_loss": "min", "val_acc": "max"},
             criteria="any",
         )
-        self._best_val_acc = 0.0
+        self._best_val_loss = float("inf")
         self.history_saver = HistorySaver(self.cfg.training_base_dir)
 
     def get_models(self) -> List[nn.Module]:
@@ -200,6 +199,30 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         self.logger = logger
 
+    def _get_mask_prob_by_epoch(self, epoch: int) -> float:
+        """计算给定 epoch 的遮罩概率 (基于三阶段)
+
+        策略 (与 warmup/progressive/finetune_epochs 共用):
+            - Warmup 阶段: mask_prob = 0 (不使用遮罩)
+            - Progressive 阶段: mask_prob 从 mask_start_prob 线性增加到 mask_end_prob
+            - Finetune 阶段: mask_prob = mask_end_prob (固定)
+        """
+        cfg = self.cfg
+        start_prob = cfg.mask_start_prob  # 0.0
+        end_prob = cfg.mask_end_prob  # 0.8
+
+        if epoch < cfg.warmup_epochs:
+            # Warmup 阶段: 概率为 0
+            return 0.0
+        elif epoch < cfg.warmup_epochs + cfg.progressive_epochs:
+            # Progressive 阶段: 概率从 start_prob 线性增加到 end_prob
+            prog_epoch = epoch - cfg.warmup_epochs
+            progress = prog_epoch / max(cfg.progressive_epochs - 1, 1)
+            return start_prob + (end_prob - start_prob) * progress
+        else:
+            # Finetune 阶段: 概率保持 end_prob
+            return end_prob
+
     def _get_stage_info(self, epoch: int) -> Tuple[int, str, float, float, bool]:
         """获取当前阶段信息
 
@@ -212,27 +235,28 @@ class StagedEnsembleTrainer(CheckpointMixin):
         if self.augmentation_method == "none":
             return 1, "NoAug", 0.0, 0.0, False
 
+        # 计算统一概率 (所有模式共用)
+        mask_prob = self._get_mask_prob_by_epoch(epoch)
+
         # 模式2: 固定参数模式
         if not self.use_curriculum:
-            return 1, "Fixed", self.fixed_ratio, self.fixed_prob, True
+            return 1, "Fixed", self.fixed_ratio, mask_prob, True
 
         # 模式3: 课程学习模式 (三阶段)
         if epoch < cfg.warmup_epochs:
+            # Warmup 阶段: 不使用遮罩
             return 1, "Warmup", 0.0, 0.0, False
         elif epoch < cfg.warmup_epochs + cfg.progressive_epochs:
-            # 使用 (epochs - 1) 确保最后一个 epoch 精确达到 end 值
+            # Progressive 阶段: ratio 线性增长，prob 使用统一策略
             progress = (epoch - cfg.warmup_epochs) / max(cfg.progressive_epochs - 1, 1)
             mask_ratio = (
                 cfg.mask_start_ratio
                 + (cfg.mask_end_ratio - cfg.mask_start_ratio) * progress
             )
-            mask_prob = (
-                cfg.mask_prob_start
-                + (cfg.mask_prob_end - cfg.mask_prob_start) * progress
-            )
             return 2, "Progressive", mask_ratio, mask_prob, True
         else:
-            return 3, "Finetune", cfg.finetune_mask_ratio, cfg.finetune_mask_prob, True
+            # Finetune 阶段: ratio 固定，prob 使用统一策略
+            return 3, "Finetune", cfg.finetune_mask_ratio, mask_prob, True
 
     def _train_epoch(self, train_loader: DataLoader, epoch: int) -> Tuple[float, float]:
         """训练单个 Epoch (大纲化)
@@ -386,10 +410,14 @@ class StagedEnsembleTrainer(CheckpointMixin):
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
         s_num, s_name, *_ = self._get_stage_info(epoch)
+
+        # 统一 backbone 共享逻辑：在 warmup_epochs 结束后的第一个 epoch 触发
+        # 无论是课程学习模式还是 Fixed 模式都适用
+        if epoch == self.cfg.warmup_epochs and self.share_warmup_backbone:
+            self._broadcast_warmup_backbone()
+
+        # 阶段切换日志
         if s_num != current_stage:
-            # 执行阶段切换逻辑 (如 Backbone 广播)
-            if s_num == 2 and current_stage == 1 and self.share_warmup_backbone:
-                self._broadcast_warmup_backbone()
             self._log_stage_header(s_num)
         return s_num
 
@@ -416,9 +444,9 @@ class StagedEnsembleTrainer(CheckpointMixin):
         # 1. 记录历史
         self._record_metrics(epoch, stats)
 
-        # 2. 保存最佳模型 (基于 accuracy)
-        if stats["val_acc"] > self._best_val_acc:
-            self._best_val_acc = stats["val_acc"]
+        # 2. 保存最佳模型 (基于 loss)
+        if stats["val_loss"] < self._best_val_loss:
+            self._best_val_loss = stats["val_loss"]
             self._save_checkpoint("best")
 
         # 3. 打印汇总日志
@@ -502,11 +530,12 @@ def train_experiment(
     """
     仅训练实验 (不包含评估)
 
-    所有增强参数从 cfg 读取:
+    什所有增强参数从 cfg 读取:
     - cfg.experiment_name: 实验名称
     - cfg.augmentation_method: 增强方法
     - cfg.use_curriculum: 是否使用课程学习
-    - cfg.fixed_ratio, cfg.fixed_prob: 固定遮挡参数
+    - cfg.fixed_ratio: 固定遮挡比例
+    - cfg.mask_start_prob, cfg.mask_end_prob: 统一概率增长参数 (与三阶段共用)
     - cfg.share_warmup_backbone: 是否共享 backbone
 
     参数:
@@ -522,7 +551,6 @@ def train_experiment(
         augmentation_method=cfg.augmentation_method,
         use_curriculum=cfg.use_curriculum,
         fixed_ratio=cfg.fixed_ratio,
-        fixed_prob=cfg.fixed_prob,
         share_warmup_backbone=cfg.share_warmup_backbone,
     )
 
@@ -531,6 +559,15 @@ def train_experiment(
 
     # 加载最佳模型
     trainer.load_checkpoint("best")
+
+    # 输出 best checkpoint 对应的 val acc
+    if trainer.history["val_loss"]:
+        best_idx = trainer.history["val_loss"].index(min(trainer.history["val_loss"]))
+        best_val_acc = trainer.history["val_acc"][best_idx]
+        best_epoch = trainer.history["epoch"][best_idx]
+        get_logger().info(
+            f"📊 Best Checkpoint (Epoch {best_epoch}): Val Acc = {best_val_acc:.2f}%"
+        )
 
     get_logger().info(f"✅ Training completed: {cfg.experiment_name}")
 

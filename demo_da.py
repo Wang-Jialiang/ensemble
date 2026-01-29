@@ -8,24 +8,22 @@ import torchvision
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ensemble.training.augmentation import (
-    CutoutAugmentation,
     GridMaskAugmentation,
     PerlinMaskAugmentation,
-    PixelHaSAugmentation,
 )
 
 
 # Mock Config
 class MockConfig:
     def __init__(self):
-        self.image_size = 1024
+        self.image_size = 32
         self.mask_pool_size = 1
         self.augmentation_use_mean_fill = False
         self.dataset_mean = [0.485, 0.456, 0.406]
         self.dataset_std = [0.229, 0.224, 0.225]
 
         # Demo parameters
-        self.target_ratio = 0.25
+        self.target_ratio = 0.4
         self.augmentation_prob = 1.0
 
         # GridMask
@@ -35,7 +33,8 @@ class MockConfig:
         # Perlin
         self.perlin_persistence = 0.5
         self.perlin_octaves = 4
-        self.perlin_scale_ratio = 0.25
+        self.perlin_scale_ratio_min = 0.08
+        self.perlin_scale_ratio_max = 0.12
 
 
 def get_demo_image(cfg: MockConfig):
@@ -60,7 +59,7 @@ def get_demo_image(cfg: MockConfig):
 
 
 def run_demo():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     cfg = MockConfig()
@@ -70,8 +69,8 @@ def run_demo():
 
     # 2. Setup Methods
     methods = {
-        "Cutout": CutoutAugmentation.from_config(device, cfg),
-        "PixelHaS": PixelHaSAugmentation.from_config(device, cfg),
+        # "Cutout": CutoutAugmentation.from_config(device, cfg),
+        # "PixelHaS": PixelHaSAugmentation.from_config(device, cfg),
         "GridMask": GridMaskAugmentation.from_config(device, cfg),
         "Perlin": PerlinMaskAugmentation.from_config(device, cfg),
     }

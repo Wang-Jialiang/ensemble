@@ -65,7 +65,7 @@ base:
   # [全局] 模型配置 - 被 StagedEnsembleTrainer 使用
   # ==========================================================================
   model_name: "resnet18"            # 模型名称: "resnet18", "resnet50", "vgg16" 等
-  num_models_per_gpu: 3             # 每个 GPU 上的模型数量
+  num_models_per_gpu: 2             # 每个 GPU 上的模型数量
 
   # ==========================================================================
   # [全局] 训练超参数 - 被 StagedEnsembleTrainer 使用
@@ -79,24 +79,28 @@ base:
   early_stopping_patience: 10       # 早停耐心值 (验证集无改善的轮数)
 
   # [增强细节调整]
-  perlin_scale_ratio: 0.25          # Perlin 噪声尺度比例 (0.2 约产生 2-3 个主要遮挡块)
-  gridmask_d_ratio_min: 0.4        # GridMask 最小网格 (约产生 3-4 个遮挡块)
-  gridmask_d_ratio_max: 0.6        # GridMask 最大网格 (与 Perlin 遮挡块数量一致)
+  perlin_scale_ratio_min: 0.08      # Perlin 噪声尺度比例下界
+  perlin_scale_ratio_max: 0.08      # Perlin 噪声尺度比例上界
+  gridmask_d_ratio_min: 0.5        # GridMask 最小网格 (约产生 3-4 个遮挡块)
+  gridmask_d_ratio_max: 0.5        # GridMask 最大网格 (与 Perlin 遮挡块数量一致)
   augmentation_use_mean_fill: false  # 遮挡填充: false=黑色, true=均值(灰色)
+  gridded_perlin_grid_size: 32       # Gridded Perlin 网格大小 (值越大云块越分散)
+  gridded_perlin_cloud_ratio: 0.6    # 每个网格内云块占比 (值越大云块越大)
 
   # ==========================================================================
   # [阶段训练专用] 三阶段与 Mask - 仅 StagedEnsembleTrainer 使用
   # ==========================================================================
-  warmup_epochs: 10                 # Warmup 阶段轮数
-  progressive_epochs: 70            # Progressive 阶段轮数
+  warmup_epochs: 0               # Warmup 阶段轮数
+  progressive_epochs: 80           # Progressive 阶段轮数
   finetune_epochs: 20               # Finetune 阶段轮数
   mask_pool_size: 1024              # 预生成的 Mask 池大小
-  mask_start_ratio: 0.15            # Progressive 阶段起始遮罩比例
-  mask_end_ratio: 0.35              # Progressive 阶段结束遮罩比例
-  mask_prob_start: 0.30             # Progressive 阶段起始应用概率
-  mask_prob_end: 0.70               # Progressive 阶段结束应用概率
-  finetune_mask_ratio: 0.25         # Finetune 阶段固定遮罩比例
-  finetune_mask_prob: 0.50          # Finetune 阶段固定应用概率
+  mask_start_ratio: 0.3            # Progressive 阶段起始遮罩比例
+  mask_end_ratio: 0.5              # Progressive 阶段结束遮罩比例
+  finetune_mask_ratio: 0.4         # Finetune 阶段固定遮罩比例
+
+  # [统一概率增长策略] 与三阶段共用 warmup/progressive/finetune_epochs
+  mask_start_prob: 0.0              # Progressive 阶段起始概率
+  mask_end_prob: 0.8                # Progressive/Finetune 阶段最终概率
 
   # ==========================================================================
   # [全局] 数据加载配置 - 被 StagedEnsembleTrainer 使用
@@ -136,9 +140,9 @@ base:
   # ==========================================================================
   augmentation_method: "perlin"     # 增强方法: "perlin", "cutout", "none" 等
   use_curriculum: true              # 是否使用课程学习
-  fixed_ratio: 0.25                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
-  fixed_prob: 0.5                   # 固定遮挡概率 (仅 use_curriculum=false 时生效)
-  share_warmup_backbone: false       # 是否在 warmup 后共享 backbone (仅 use_curriculum=true 时生效)
+  fixed_ratio: 0.4                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
+  # fixed_prob 已移除，统一使用 mask_start_prob 和 mask_end_prob
+  share_warmup_backbone: false       # 是否在 warmup 后共享 backbone (所有增强模式均生效)
 
 # ==============================================================================
 # 实验列表
@@ -148,27 +152,14 @@ experiments:
   # Perlin 噪声遮挡
   # ============================================================================
   - name: "Exp01_Perlin_Curriculum"
-
-    augmentation_method: "perlin"
+    augmentation_method: "gridded_perlin"
     use_curriculum: true
+    share_warmup_backbone: false
 
   - name: "Exp02_Perlin_Fixed"
-
-    augmentation_method: "perlin"
+    augmentation_method: "gridded_perlin"
     use_curriculum: false
-
-  # ============================================================================
-  # Cutout 硬遮挡
-  # ============================================================================
-  - name: "Exp03_Cutout_Curriculum"
-
-    augmentation_method: "cutout"
-    use_curriculum: true
-
-  - name: "Exp04_Cutout_Fixed"
-
-    augmentation_method: "cutout"
-    use_curriculum: false
+    share_warmup_backbone: false
 
   # ============================================================================
   # GridMask 网格遮挡
@@ -176,49 +167,34 @@ experiments:
   - name: "Exp05_GridMask_Curriculum"
     augmentation_method: "gridmask"
     use_curriculum: true
+    share_warmup_backbone: false
 
   - name: "Exp06_GridMask_Fixed"
     augmentation_method: "gridmask"
     use_curriculum: false
-
-  # ============================================================================
-  # 像素级 Hide-and-Seek
-  # ============================================================================
-  - name: "Exp07_PixelHaS_Curriculum"
-    augmentation_method: "pixel_has"
-    use_curriculum: true
-
-  - name: "Exp08_PixelHaS_Fixed"
-    augmentation_method: "pixel_has"
-    use_curriculum: false
+    share_warmup_backbone: false
 
   # ============================================================================
   # Baseline (无增强)
   # ============================================================================
   - name: "Exp09_Baseline"
-
     augmentation_method: "none"
     use_curriculum: false
-
-
+    share_warmup_backbone: false
 
 # ==============================================================================
 # 评估配置 (仅 --eval 模式)
 # ==============================================================================
 # 只需修改此时间戳，所有检查点路径自动更新
 # 路径格式: ./output/training/{training_timestamp}/{exp_name}/checkpoints/best
-training_timestamp: "20260117_200031"  # 修改这里即可
+training_timestamp: "20260128_004045"  # 修改这里即可
 
-# 实验列表 (路径由代码自动拼接)
+# 实验列表
 eval_checkpoints:
   - "Exp01_Perlin_Curriculum"
   - "Exp02_Perlin_Fixed"
-  - "Exp03_Cutout_Curriculum"
-  - "Exp04_Cutout_Fixed"
   - "Exp05_GridMask_Curriculum"
   - "Exp06_GridMask_Fixed"
-  - "Exp07_PixelHaS_Curriculum"
-  - "Exp08_PixelHaS_Fixed"
   - "Exp09_Baseline"
 
 # ==============================================================================

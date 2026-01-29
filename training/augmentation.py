@@ -28,15 +28,17 @@ class _CloudMaskGenerator:
         device: torch.device,
         persistence: float,
         octaves: int,
-        scale_ratio: float,
+        scale_ratio_min: float,
+        scale_ratio_max: float,
     ):
         self.h = height
         self.w = width
         self.device = device
         self.persistence = persistence
         self.octaves = octaves
-        # base_scale 随图像尺寸动态调整，使用 scale_ratio 控制碎裂程度
-        self.base_scale = min(height, width) * scale_ratio
+        # scale_ratio 范围，每次生成时随机选择
+        self.scale_ratio_min = scale_ratio_min
+        self.scale_ratio_max = scale_ratio_max
 
     def generate_batch(
         self, num_masks: int, target_ratio: float = 0.3
@@ -53,7 +55,9 @@ class _CloudMaskGenerator:
 
     def _get_noise_map(self):
         """生成一张随机缩放的底图"""
-        scale = self.base_scale * random.uniform(0.8, 1.2)
+        # 在 [scale_ratio_min, scale_ratio_max] 范围随机选择尺度比例
+        scale_ratio = random.uniform(self.scale_ratio_min, self.scale_ratio_max)
+        scale = min(self.h, self.w) * scale_ratio
         return self._generate_perlin_noise(scale)
 
     def _threshold_noise(self, noise, ratio):
@@ -96,8 +100,9 @@ class _CloudMaskGenerator:
             max_val += amplitude
             amplitude *= self.persistence
 
-        # 4. 归一化并截断 (防止 bicubic 造成的数值溢出)
-        return (noise / max_val).clamp_(0, 1)
+        # 4. 归一化到 [0, 1] (使用 min-max 归一化，避免 randn 产生的负值导致 mask 全黑)
+        noise = noise / max_val
+        return (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -396,7 +401,8 @@ class PerlinMaskAugmentation(AugmentationMethod):
         pool_size: int = 1024,
         persistence: float = 0.5,
         octaves: int = 4,
-        scale_ratio: float = 0.25,
+        scale_ratio_min: float = 0.20,
+        scale_ratio_max: float = 0.30,
         fill_value: torch.Tensor = None,
     ):
         super().__init__(device, pool_size, fill_value)
@@ -407,7 +413,8 @@ class PerlinMaskAugmentation(AugmentationMethod):
             device,
             persistence,
             octaves,
-            scale_ratio,
+            scale_ratio_min,
+            scale_ratio_max,
         )
 
     @classmethod
@@ -419,7 +426,8 @@ class PerlinMaskAugmentation(AugmentationMethod):
             cfg.mask_pool_size,
             cfg.perlin_persistence,
             cfg.perlin_octaves,
-            cfg.perlin_scale_ratio,
+            cfg.perlin_scale_ratio_min,
+            cfg.perlin_scale_ratio_max,
             cls._compute_fill_value(cfg),
         )
 
@@ -427,6 +435,128 @@ class PerlinMaskAugmentation(AugmentationMethod):
         """预计算 Perlin mask 池"""
         self._clear_masks()  # 清理旧 mask，释放显存
         self._masks = self.mask_generator.generate_batch(self._pool_size, target_ratio)
+
+
+@register_augmentation("gridded_perlin")
+class GriddedPerlinAugmentation(AugmentationMethod):
+    """网格化 Perlin 噪声遮挡
+
+    将 Perlin 云状遮挡分布在规则网格位置上，形成分散的柔和云块。
+    结合了 GridMask 的规则分布和 Perlin 噪声的自然边缘。
+    """
+
+    def __init__(
+        self,
+        device: torch.device,
+        height: int,
+        width: int,
+        pool_size: int = 1024,
+        persistence: float = 0.5,
+        octaves: int = 4,
+        grid_size: int = 32,
+        cloud_ratio: float = 0.6,
+        fill_value: torch.Tensor = None,
+    ):
+        super().__init__(device, pool_size, fill_value)
+        self.height, self.width = height, width
+        self.persistence = persistence
+        self.octaves = octaves
+        self.grid_size = grid_size
+        self.cloud_ratio = cloud_ratio  # 每个网格内云块占比
+
+    @classmethod
+    def from_config(cls, device, cfg):
+        return cls(
+            device,
+            cfg.image_size,
+            cfg.image_size,
+            cfg.mask_pool_size,
+            cfg.perlin_persistence,
+            cfg.perlin_octaves,
+            getattr(cfg, "gridded_perlin_grid_size", 32),
+            getattr(cfg, "gridded_perlin_cloud_ratio", 0.6),
+            cls._compute_fill_value(cfg),
+        )
+
+    def precompute_masks(self, target_ratio: float):
+        """预计算网格化 Perlin mask 池"""
+        self._clear_masks()
+        for _ in range(self._pool_size):
+            self._masks.append(self._generate_gridded_perlin_mask(target_ratio))
+
+    def _generate_gridded_perlin_mask(self, target_ratio: float) -> torch.Tensor:
+        """生成单张网格化 Perlin mask"""
+        H, W = self.height, self.width
+        grid_size = self.grid_size
+
+        # 1. 生成基础 Perlin 噪声
+        noise = self._generate_perlin_noise()
+
+        # 2. 创建网格蒙版 (每个格子中心放一个圆形柔和区域)
+        grid_mask = torch.zeros(H, W, device=self.device)
+        radius = int(grid_size * self.cloud_ratio / 2)
+
+        # 随机偏移，增加多样性
+        off_y = random.randint(0, grid_size - 1)
+        off_x = random.randint(0, grid_size - 1)
+
+        for i in range(-1, H // grid_size + 2):
+            for j in range(-1, W // grid_size + 2):
+                # 格子中心
+                cy = i * grid_size + grid_size // 2 + off_y
+                cx = j * grid_size + grid_size // 2 + off_x
+
+                # 创建柔和的圆形区域
+                y_coords = torch.arange(H, device=self.device).float()
+                x_coords = torch.arange(W, device=self.device).float()
+                yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
+
+                dist = torch.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+                # 柔和边缘：从中心到边缘渐变
+                soft_circle = torch.clamp(1.0 - dist / radius, 0.0, 1.0)
+                grid_mask = torch.maximum(grid_mask, soft_circle)
+
+        # 3. 将 Perlin 噪声与网格蒙版相乘
+        combined = noise * grid_mask
+
+        # 4. 基于分位数阈值化
+        threshold = torch.quantile(combined[combined > 0], 1.0 - target_ratio)
+        mask = (combined < threshold).float()
+
+        return mask.view(1, 1, H, W)
+
+    def _generate_perlin_noise(self) -> torch.Tensor:
+        """生成 Perlin 噪声底图"""
+        H, W = self.height, self.width
+        scale = min(H, W) * 0.15  # 固定较小尺度，云块更紧凑
+
+        noise = torch.zeros(H, W, device=self.device)
+        amplitude = 1.0
+        max_val = 0.0
+
+        for i in range(self.octaves):
+            freq = 2**i
+            grid_h = max(2, int(H / (scale / freq)))
+            grid_w = max(2, int(W / (scale / freq)))
+
+            rand_grid = torch.randn(grid_h + 2, grid_w + 2, device=self.device)
+            off_h = random.randint(0, 1)
+            off_w = random.randint(0, 1)
+            sub_grid = rand_grid[off_h : off_h + grid_h + 1, off_w : off_w + grid_w + 1]
+
+            upsampled = F.interpolate(
+                sub_grid.unsqueeze(0).unsqueeze(0),
+                size=(H, W),
+                mode="bicubic",
+                align_corners=True,
+            ).squeeze()
+
+            noise += upsampled * amplitude
+            max_val += amplitude
+            amplitude *= self.persistence
+
+        noise = noise / max_val
+        return (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
 
 
 @register_augmentation("none")

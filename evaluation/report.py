@@ -60,7 +60,9 @@ class ReportGenerator:
 
         # 3. 对抗性与可解释性分析
         res.update(
-            ReportGenerator._run_analysis_eval(models, cfg, test_loader, **datasets)
+            ReportGenerator._run_analysis_eval(
+                models, cfg, test_loader, exp_name, **datasets
+            )
         )
 
         # 4. 参数空间多样性 (Loss Landscape)
@@ -99,7 +101,7 @@ class ReportGenerator:
         return r
 
     @staticmethod
-    def _run_analysis_eval(models, cfg, loader, **ds):
+    def _run_analysis_eval(models, cfg, loader, exp_name="", **ds):
         a = {"adversarial_results": None, "gradcam_metrics": None}
         if ds.get("run_adversarial", True):
             get_logger().info("  ├─ ⚔️ Adversarial robustness")
@@ -114,6 +116,7 @@ class ReportGenerator:
                 loader,
                 cfg.gradcam_num_samples,
                 cfg.image_size,
+                exp_name=exp_name,
             )
         return a
 
