@@ -30,7 +30,8 @@ class GenerationConfig:
     sdxl_width: Optional[int] = None  # Text2Img 原始输出宽度
     guidance_scale_text2img: Optional[float] = None  # Text2Img CFG
 
-    ood_prompts: Optional[list[str]] = None  # 由 default.yaml 填充
+    near_ood_prompts: Optional[dict[str, list[str]]] = None  # Near-OOD (按数据集分组)
+    far_ood_prompts: Optional[dict[str, list[str]]] = None  # Far-OOD (按数据集分组)
     vis_corruptions: Optional[list[str]] = None  # 由 default.yaml 填充
 
 
@@ -116,10 +117,21 @@ class Config:
     ensemble_strategy: Optional[str] = (
         None  # 集成策略: "mean" (等权平均), "voting" (多数投票)
     )
+    eval_num_models: Optional[int] = None  # 评估时使用的模型数量 (None = 使用全部)
     corruption_dataset: Optional[bool] = None  # 是否加载 Corruption 数据集进行评估
     ood_dataset: Optional[bool] = None  # 是否加载 OOD 数据集进行评估
     eval_run_gradcam: Optional[bool] = None  # 是否在评估时运行 Grad-CAM 分析
     eval_run_landscape: Optional[bool] = None  # 是否在评估时运行 Loss Landscape 分析
+
+    # --------------------------------------------------------------------------
+    # [评估专用] TTA 配置 - 测试时数据增强
+    # --------------------------------------------------------------------------
+    tta_enabled: Optional[bool] = None  # 是否启用 TTA
+    tta_strategy: Optional[str] = (
+        None  # TTA 策略: "light", "standard", "heavy", "geospatial"
+    )
+    tta_crop_scales: Optional[list[float]] = None  # 随机裁剪的尺度范围
+    tta_num_crops: Optional[int] = None  # 裁剪数量 (4角 + 中心)
 
     # ==========================================================================
     # [评估专用] 对抗鲁棒性评估参数 - 仅评估模块使用
@@ -182,6 +194,13 @@ class Config:
     fixed_ratio: Optional[float] = None  # 固定遮挡比例 (仅 use_curriculum=False 时生效)
     # fixed_prob 已移除，统一使用 mask_start_prob 和 mask_end_prob
     share_warmup_backbone: Optional[bool] = None  # 是否在 warmup 后共享 backbone
+
+    # ==========================================================================
+    # [类别自适应增强] CADA 参数 - 基于校准偏差动态调整增强
+    # ==========================================================================
+    cada_enabled: Optional[bool] = None  # 是否启用类别自适应增强
+    cada_sensitivity: Optional[float] = None  # 偏差敏感度 (越大响应越强)
+    cada_prob_range: Optional[list[float]] = None  # 触发概率范围 [min, max]
 
     # ==========================================================================
     # [数据生成] SDXL Lightning 生成配置
@@ -293,6 +312,7 @@ class Config:
     # 允许为 None 的可选字段
     _OPTIONAL_FIELDS = {
         "adv_eps_list",  # 多 ε 评估列表，可选功能
+        "eval_num_models",  # 评估时使用的模型数量，可选
     }
 
     def _validate_fields(self) -> None:

@@ -16,6 +16,7 @@
 - landscape: Loss Landscape 可视化
 - saver: 结果保存
 - report: 报告生成
+- tta: TTA 测试时数据增强
 
 使用方式:
     from ensemble.evaluation import ReportGenerator, evaluate_adversarial
@@ -63,6 +64,15 @@ from .saver import ResultsSaver
 # 集成策略
 from .strategies import ENSEMBLE_STRATEGIES, EnsembleFn, get_ensemble_fn
 
+# TTA 测试时数据增强
+from .tta import (
+    TTAAugmentor,
+    TTAConfig,
+    TTAStrategyType,
+    create_tta_augmentor_for_dataset,
+    get_all_models_logits_with_tta,
+)
+
 __all__ = [
     # Strategies
     "ENSEMBLE_STRATEGIES",
@@ -91,4 +101,10 @@ __all__ = [
     # Reporting
     "ResultsSaver",
     "ReportGenerator",
+    # TTA
+    "TTAConfig",
+    "TTAStrategyType",
+    "TTAAugmentor",
+    "get_all_models_logits_with_tta",
+    "create_tta_augmentor_for_dataset",
 ]

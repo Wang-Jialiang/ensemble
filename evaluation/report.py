@@ -222,16 +222,20 @@ class ReportGenerator:
 
         # 2. 校准性 (↓ 低好)
         lines.append("\n📏 校准性 (Calibration)")
-        lines.append("-" * 70)
-        lines.append(f"{'Experiment':<25} | {'ece↓':<16} | {'nll↓':<16}")
-        lines.append("-" * 70)
+        lines.append("-" * 90)
+        lines.append(
+            f"{'Experiment':<25} | {'ece↓':<16} | {'nll↓':<16} | {'entropy↓':<16}"
+        )
+        lines.append("-" * 90)
         ece_vals = get_std_vals("ece")
         nll_vals = get_std_vals("nll")
+        ent_vals = get_std_vals("entropy")
         for n in exps:
             m = results[n].get("standard_metrics", {})
             lines.append(
                 f"{n:<25} | {cls._format_val(m.get('ece', 0), ece_vals, False, '.6f'):<16} | "
-                f"{cls._format_val(m.get('nll', 0), nll_vals, False, '.6f'):<16}"
+                f"{cls._format_val(m.get('nll', 0), nll_vals, False, '.6f'):<16} | "
+                f"{cls._format_val(m.get('entropy', 0), ent_vals, False, '.6f'):<16}"
             )
 
         # 3. 多样性 (disagreement↑高好, js_div↑高好, avg_cka↓低好表示更多样)
@@ -389,6 +393,20 @@ class ReportGenerator:
                     f"{cls._format_val(ood.get('ood_fpr95_msp', 0), fpr_msp, False):<14} | "
                     f"{cls._format_val(ood.get('ood_fpr95_energy', 0), fpr_energy, False):<16} | "
                     f"{cls._format_val(ood.get('ood_fpr95_mahalanobis', 0), fpr_mahal, False):<14}"
+                )
+
+            lines.append("-" * 160)
+            lines.append(
+                f"{'Experiment':<25} | {'entropy_auroc↑':<16} | {'entropy_fpr95↓':<16}"
+            )
+            lines.append("-" * 60)
+            ent_auroc = get_ood_vals("ood_auroc_entropy")
+            ent_fpr = get_ood_vals("ood_fpr95_entropy")
+            for n in exps:
+                ood = results[n].get("ood_results") or {}
+                lines.append(
+                    f"{n:<25} | {cls._format_val(ood.get('ood_auroc_entropy', 0), ent_auroc, True):<16} | "
+                    f"{cls._format_val(ood.get('ood_fpr95_entropy', 0), ent_fpr, False):<16}"
                 )
 
         # 7. Adversarial 鲁棒性 (↑ 高好)

@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from ..config import Config
 from ..utils import console, ensure_dir, format_duration, get_logger
+from .calibration_tracker import CalibrationTracker
 from .optimization import EarlyStopping
 from .worker import GPUWorker, HistorySaver
 
@@ -103,7 +104,10 @@ class StagedEnsembleTrainer(CheckpointMixin):
             for gid in cfg.gpu_ids
         ]
 
-        # 4. 初始化状态跟踪变量
+        # 4. 初始化类别自适应增强 (CADA)
+        self._init_calibration_tracker()
+
+        # 5. 初始化状态跟踪变量
         self._init_tracking_structures()
 
     def _init_hardware_optimizations(self):
@@ -173,6 +177,17 @@ class StagedEnsembleTrainer(CheckpointMixin):
         self._best_val_loss = float("inf")
         self.history_saver = HistorySaver(self.cfg.training_base_dir)
 
+    def _init_calibration_tracker(self):
+        """初始化类别自适应增强组件"""
+        self.cada_enabled = getattr(self.cfg, "cada_enabled", False)
+        if self.cada_enabled:
+            self.calibration_tracker = CalibrationTracker(self.cfg.num_classes)
+            self.logger.info(
+                f"📊 CADA 已启用，将在 Epoch {self.cfg.warmup_epochs} 后开始自适应"
+            )
+        else:
+            self.calibration_tracker = None
+
     def get_models(self) -> List[nn.Module]:
         """获取所有模型列表 (与其他 Trainer 接口一致)"""
         return [model for worker in self.workers for model in worker.models]
@@ -187,7 +202,7 @@ class StagedEnsembleTrainer(CheckpointMixin):
 
         # 文件输出 (放在时间戳目录下，文件名包含实验名)
         log_path = Path(self.cfg.training_base_dir) / f"{self.name}_train.log"
-        file_handler = logging.FileHandler(log_path, mode="w")
+        file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
@@ -342,11 +357,22 @@ class StagedEnsembleTrainer(CheckpointMixin):
         return total_loss / n
 
     @torch.no_grad()
-    def _validate(self, val_loader: DataLoader) -> Tuple[float, float]:
-        """集成验证过程"""
+    def _validate(
+        self, val_loader: DataLoader, update_calibration: bool = False
+    ) -> Tuple[float, float]:
+        """集成验证过程
+
+        Args:
+            val_loader: 验证数据加载器
+            update_calibration: 是否更新校准追踪器（用于 CADA）
+        """
         criterion = nn.CrossEntropyLoss()
         total_loss, correct, total = 0.0, 0, 0
         device = self.workers[0].device  # 主计算设备
+
+        # 重置校准追踪器
+        if update_calibration and self.calibration_tracker:
+            self.calibration_tracker.reset()
 
         for inputs, targets in val_loader:
             # 1. 聚合所有 Worker 的预测 Logits
@@ -357,6 +383,14 @@ class StagedEnsembleTrainer(CheckpointMixin):
             total_loss += criterion(ensemble_logits, targets).item()
             correct += (ensemble_logits.argmax(1) == targets).sum().item()
             total += targets.size(0)
+
+            # 3. 更新校准追踪器
+            if update_calibration and self.calibration_tracker:
+                self.calibration_tracker.update(ensemble_logits, targets)
+
+        # 4. 计算校准偏差
+        if update_calibration and self.calibration_tracker:
+            self.calibration_tracker.compute_bias()
 
         return total_loss / len(val_loader), 100.0 * correct / total
 
@@ -405,7 +439,11 @@ class StagedEnsembleTrainer(CheckpointMixin):
                 # 清理 wandb 本地缓存目录
                 wandb_dir = Path.cwd() / "wandb"
                 if wandb_dir.exists():
-                    shutil.rmtree(wandb_dir, ignore_errors=False)
+                    try:
+                        time.sleep(1)  # Windows file lock workaround
+                        shutil.rmtree(wandb_dir, ignore_errors=True)
+                    except Exception:
+                        pass
 
     def _handle_epoch_prep(self, epoch, current_stage):
         """处理 Epoch 开始前的预备动作 (如阶段切换)"""
@@ -425,7 +463,16 @@ class StagedEnsembleTrainer(CheckpointMixin):
         """执行单个 Epoch 的计算循环并收集指标"""
         t0 = time.time()
         t_loss, current_lr = self._train_epoch(train_loader, epoch)
-        v_loss, v_acc = self._validate(val_loader)
+
+        # 判断是否需要更新校准统计（CADA 启用且 warmup 结束）
+        update_calibration = self.cada_enabled and epoch >= self.cfg.warmup_epochs
+        v_loss, v_acc = self._validate(
+            val_loader, update_calibration=update_calibration
+        )
+
+        # 更新自适应增强参数
+        if update_calibration:
+            self._update_adaptive_params(epoch)
 
         # 获取当前元数据
         _, _, m_ratio, m_prob, _ = self._get_stage_info(epoch)
@@ -438,6 +485,40 @@ class StagedEnsembleTrainer(CheckpointMixin):
             "lr": current_lr,  # 使用本 epoch 实际使用的 LR
             "time": time.time() - t0,
         }
+
+    def _update_adaptive_params(self, epoch: int):
+        """基于校准偏差更新类别自适应增强参数"""
+        if not self.calibration_tracker:
+            return
+
+        cfg = self.cfg
+        _, _, _, base_prob, _ = self._get_stage_info(epoch)
+
+        # 获取配置参数
+        sensitivity = getattr(cfg, "cada_sensitivity", 2.0)
+        prob_range = tuple(getattr(cfg, "cada_prob_range", [0.0, 0.8]))
+
+        # 计算每个类别的自适应概率
+        class_probs = self.calibration_tracker.get_all_adaptive_probs(
+            base_prob=base_prob,
+            prob_range=prob_range,
+            sensitivity=sensitivity,
+        )
+
+        # 更新所有 Worker 的自适应参数
+        for worker in self.workers:
+            worker.update_adaptive_probs(class_probs)
+
+        # 记录日志
+        summary = self.calibration_tracker.get_summary()
+        avg_bias = summary["bias"].mean().item()
+        max_bias = summary["bias"].max().item()
+        min_bias = summary["bias"].min().item()
+        self.logger.info(
+            f"📊 CADA 更新 | 平均偏差: {avg_bias:+.4f} | "
+            f"范围: [{min_bias:+.4f}, {max_bias:+.4f}] | "
+            f"概率范围: [{min(class_probs):.2f}, {max(class_probs):.2f}]"
+        )
 
     def _handle_epoch_post(self, epoch, stats):
         """处理 Epoch 结束后的辅助动作 (日志、快照)"""

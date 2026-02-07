@@ -8,8 +8,8 @@ import torchvision
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ensemble.training.augmentation import (
+    GriddedPerlinAugmentation,
     GridMaskAugmentation,
-    PerlinMaskAugmentation,
 )
 
 
@@ -35,6 +35,10 @@ class MockConfig:
         self.perlin_octaves = 4
         self.perlin_scale_ratio_min = 0.08
         self.perlin_scale_ratio_max = 0.12
+
+        # Gridded Perlin
+        self.gridded_perlin_grid_size = 32  # 网格大小
+        self.gridded_perlin_cloud_ratio = 0.6  # 每个网格内云块占比
 
 
 def get_demo_image(cfg: MockConfig):
@@ -72,7 +76,7 @@ def run_demo():
         # "Cutout": CutoutAugmentation.from_config(device, cfg),
         # "PixelHaS": PixelHaSAugmentation.from_config(device, cfg),
         "GridMask": GridMaskAugmentation.from_config(device, cfg),
-        "Perlin": PerlinMaskAugmentation.from_config(device, cfg),
+        "gridded_perlin": GriddedPerlinAugmentation.from_config(device, cfg),
     }
 
     output_dir = os.path.dirname(os.path.abspath(__file__))

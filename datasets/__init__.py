@@ -5,7 +5,7 @@
 
 模块化数据集包，包含：
 - base: BasePreloadedDataset 基类
-- preloaded: PreloadedCIFAR10, PreloadedEuroSAT, DATASET_REGISTRY
+- preloaded: PreloadedCIFAR10, PreloadedEuroSAT, PreloadedFGVCAircraft, DATASET_REGISTRY
 - loader: load_dataset
 - robustness/: 鲁棒性评估数据集子包 (corruption, ood, generate)
 
@@ -28,6 +28,7 @@ from .preloaded import (
     DATASET_REGISTRY,
     PreloadedCIFAR10,
     PreloadedEuroSAT,
+    PreloadedFGVCAircraft,
     register_dataset,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "DATASET_REGISTRY",
     "PreloadedCIFAR10",
     "PreloadedEuroSAT",
+    "PreloadedFGVCAircraft",
     "register_dataset",
     # Loader
     "load_dataset",

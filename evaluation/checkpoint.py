@@ -132,6 +132,11 @@ class CheckpointLoader:
         if not model_files:
             raise RuntimeError(f"未找到模型文件: {checkpoint_dir}")
 
+        # 限制模型数量 (eval_num_models)
+        eval_num_models = getattr(cfg, "eval_num_models", None)
+        if eval_num_models is not None and eval_num_models > 0:
+            model_files = model_files[:eval_num_models]
+
         # 获取可用 GPU 列表
         gpu_ids = getattr(cfg, "gpu_ids", [0]) if cfg else [0]
         if not gpu_ids:
@@ -148,9 +153,19 @@ class CheckpointLoader:
             )
             models.append(model)
 
-        get_logger().info(
-            f"✅ 加载 {experiment_name}: {len(models)} 个模型 (分布在 {n_gpus} GPU)"
+        # 日志提示
+        total_available = len(
+            CheckpointLoader._find_model_files(checkpoint_dir, experiment_name)
         )
+        if eval_num_models is not None and eval_num_models > 0:
+            get_logger().info(
+                f"✅ 加载 {experiment_name}: {len(models)}/{total_available} 个模型 "
+                f"(eval_num_models={eval_num_models}, 分布在 {n_gpus} GPU)"
+            )
+        else:
+            get_logger().info(
+                f"✅ 加载 {experiment_name}: {len(models)} 个模型 (分布在 {n_gpus} GPU)"
+            )
 
         return {
             "name": experiment_name,

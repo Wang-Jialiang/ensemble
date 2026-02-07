@@ -184,3 +184,86 @@ class PreloadedEuroSAT(BasePreloadedDataset):
         # 转为 Tensor 并交换通道 (H,W,C) -> (C,H,W)
         self.images = torch.from_numpy(all_images[indices]).permute(0, 3, 1, 2)
         self.targets = torch.tensor(all_targets[indices], dtype=torch.long)
+
+
+@register_dataset("fgvc_aircraft")
+class PreloadedFGVCAircraft(BasePreloadedDataset):
+    """内存预加载的 FGVC-Aircraft 细粒度飞机分类数据集
+
+    数据集信息:
+        - 100 个飞机变体类别 (variant-level annotation)
+        - 训练集+验证集: 6,667 张图像 (trainval split)
+        - 测试集: 3,333 张图像 (test split)
+        - 原始图像尺寸不固定 (1-2 Megapixels)，统一 resize 到 224x224
+    """
+
+    # 使用 ImageNet 标准统计值 (FGVC 数据集通常使用 ImageNet pretrain)
+    MEAN = [0.485, 0.456, 0.406]
+    STD = [0.229, 0.224, 0.225]
+    IMAGE_SIZE = 224
+    NUM_CLASSES = 100  # variant-level annotation
+    NUM_CHANNELS = 3
+    NAME = "FGVC-Aircraft"
+
+    def _init_transforms(self):
+        """FGVC-Aircraft 数据增强: 细粒度分类适用的策略"""
+        if self.train:
+            self.transform = transforms.Compose(
+                [
+                    transforms.RandomCrop(self.IMAGE_SIZE, padding=16),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomRotation(degrees=15),
+                ]
+            )
+        else:
+            self.transform = None
+
+    def _load_data(self):
+        """主加载流程 (支持缓存加速)"""
+        split = "trainval" if self.train else "test"
+        cache_path = Path(self.root) / f"fgvc_aircraft_cache_{split}.npz"
+
+        if cache_path.exists():
+            # 快速加载缓存
+            get_logger().info(f"⚡ 从缓存加载 {self.NAME} ({split}): {cache_path}")
+            data = np.load(cache_path)
+            imgs, lbls = data["images"], data["targets"]
+        else:
+            # 首次加载并创建缓存
+            get_logger().info(f"✈️ 首次加载 {self.NAME} ({split})，将创建缓存...")
+            source_ds = self._fetch_builtin_dataset(split)
+            imgs, lbls = self._extract_samples(source_ds)
+            np.savez(cache_path, images=imgs, targets=lbls)
+            get_logger().info(f"💾 缓存已保存: {cache_path}")
+
+        # 转为 Tensor 并交换通道 (H,W,C) -> (C,H,W)
+        self.images = torch.from_numpy(imgs).permute(0, 3, 1, 2)
+        self.targets = torch.tensor(lbls, dtype=torch.long)
+        self._log_loaded()
+
+    def _fetch_builtin_dataset(self, split: str):
+        """加载 torchvision FGVCAircraft"""
+        return torchvision.datasets.FGVCAircraft(
+            root=self.root,
+            split=split,
+            annotation_level="variant",  # 最细粒度: 100 类
+            download=False,
+        )
+
+    def _extract_samples(self, source_ds):
+        """解析 PIL Image 序列为 NumPy 阵列 (带 resize 和进度条)"""
+        resize_transform = transforms.Compose(
+            [
+                transforms.Resize((self.IMAGE_SIZE, self.IMAGE_SIZE)),
+            ]
+        )
+        get_logger().info(
+            f"✈️ Parsing {self.NAME} samples (resizing to {self.IMAGE_SIZE}x{self.IMAGE_SIZE})..."
+        )
+        imgs, lbls = [], []
+        for img, target in tqdm(source_ds, desc=f"Loading {self.NAME}", unit="img"):
+            # resize 到统一尺寸
+            img_resized = resize_transform(img)
+            imgs.append(np.array(img_resized))
+            lbls.append(target)
+        return np.stack(imgs, axis=0), np.array(lbls)

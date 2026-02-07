@@ -16,7 +16,7 @@ from torch.amp import autocast
 from ..config import Config
 from ..models import ModelFactory
 from ..utils import ensure_dir
-from .augmentation import AUGMENTATION_REGISTRY
+from .augmentation import AUGMENTATION_REGISTRY, ClassAdaptiveAugmentation
 from .optimization import create_optimizer, create_scheduler
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -83,7 +83,18 @@ class GPUWorker:
         if method not in AUGMENTATION_REGISTRY:
             raise ValueError(f"不支持的增强方法: {method}")
 
-        self.augmentation = AUGMENTATION_REGISTRY[method](self.device, self.cfg)
+        # 创建基础增强方法
+        base_augmentation = AUGMENTATION_REGISTRY[method](self.device, self.cfg)
+
+        # 如果启用 CADA，使用 ClassAdaptiveAugmentation 包装
+        if getattr(self.cfg, "cada_enabled", False) and method != "none":
+            self.augmentation = ClassAdaptiveAugmentation(
+                base_method=base_augmentation,
+                num_classes=self.cfg.num_classes,
+                base_prob=self.cfg.mask_end_prob,
+            )
+        else:
+            self.augmentation = base_augmentation
 
     def precompute_masks(self, target_ratio: float):
         """预计算 mask 池
@@ -224,6 +235,16 @@ class GPUWorker:
             model.load_state_dict(backbone_state_dict, strict=False)
             # 重新初始化 classifier head
             model.reinit_classifier(init_method=self.cfg.init_method)
+
+    def update_adaptive_probs(self, class_probs: list):
+        """更新类别自适应增强概率
+
+        Args:
+            class_probs: 每个类别的触发概率
+        """
+        if hasattr(self.augmentation, "update_adaptive_probs"):
+            self.augmentation.update_adaptive_probs(class_probs)
+            self.augmentation.enable()  # 启用自适应模式
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗

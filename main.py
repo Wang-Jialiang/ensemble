@@ -4,7 +4,23 @@
 ================================================================================
 """
 
+# ========== Windows 兼容性配置 ==========
+import io
 import sys
+
+if sys.platform == "win32":
+    import torch
+
+    # 禁用 Dynamo 编译 (Windows 不支持 Triton)
+    torch._dynamo.config.disable = True
+    torch._inductor.config.compile_threads = 1
+    # 关闭相关优化
+    torch.backends.cudnn.benchmark = False
+    torch.set_float32_matmul_precision("high")
+    # 修复终端输出中文/emoji 乱码
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
 
 sys.dont_write_bytecode = True  # 禁用 __pycache__ 生成
 

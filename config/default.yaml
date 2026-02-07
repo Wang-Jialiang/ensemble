@@ -93,7 +93,7 @@ base:
   warmup_epochs: 0               # Warmup 阶段轮数
   progressive_epochs: 80           # Progressive 阶段轮数
   finetune_epochs: 20               # Finetune 阶段轮数
-  mask_pool_size: 1024              # 预生成的 Mask 池大小
+  mask_pool_size: 4096              # 预生成的 Mask 池大小 (减少批内碰撞)
   mask_start_ratio: 0.3            # Progressive 阶段起始遮罩比例
   mask_end_ratio: 0.5              # Progressive 阶段结束遮罩比例
   finetune_mask_ratio: 0.4         # Finetune 阶段固定遮罩比例
@@ -120,10 +120,26 @@ base:
   # [评估专用] 评估配置 - 仅评估模块使用
   # ==========================================================================
   ensemble_strategy: "mean"         # 集成策略: "mean" (等权平均), "voting" (多数投票)
+  eval_num_models: null              # 评估时使用的模型数量 (null = 使用全部模型)
   corruption_dataset: true          # 是否加载 Corruption 数据集进行评估
   ood_dataset: true                 # 是否加载 OOD 数据集进行评估
   eval_run_gradcam: true            # 是否在评估时运行 Grad-CAM 分析
   eval_run_landscape: true          # 是否在评估时运行 Loss Landscape 分析
+
+  # --------------------------------------------------------------------------
+  # [评估专用] TTA 配置 - 测试时数据增强
+  # --------------------------------------------------------------------------
+  # TTA 核心思想: 对测试图像生成多个增强副本，分别推理后取平均概率
+  # 研究表明: TTA 在大尺寸图像(ImageNet)上效果显著，小尺寸(CIFAR)提升有限
+  # 注意: TTA 可能导致过度自信，建议与温度缩放(Temperature Scaling)结合使用
+  tta_enabled: false                # 是否启用 TTA
+  tta_strategy: "standard"          # TTA 策略:
+                                    #   "light"      - 仅水平翻转 (2x), 适合 CIFAR
+                                    #   "standard"   - 翻转 + 5裁剪 (~10x), 一般分类
+                                    #   "heavy"      - 翻转 + 裁剪 + 旋转 (~32x), ImageNet/细粒度
+                                    #   "geospatial" - 翻转 + 90°旋转 (8x), EuroSAT遥感
+  tta_crop_scales: [0.875, 0.9]     # 随机裁剪的尺度范围
+  tta_num_crops: 5                  # 裁剪数量 (4角 + 中心)
 
   # ==========================================================================
   # [全局] 模型初始化 - 被 StagedEnsembleTrainer 使用
@@ -143,6 +159,16 @@ base:
   fixed_ratio: 0.4                 # 固定遮挡比例 (仅 use_curriculum=false 时生效)
   # fixed_prob 已移除，统一使用 mask_start_prob 和 mask_end_prob
   share_warmup_backbone: false       # 是否在 warmup 后共享 backbone (所有增强模式均生效)
+
+  # ==========================================================================
+  # [类别自适应增强] CADA 参数 - 基于校准偏差动态调整增强
+  # ==========================================================================
+  # 核心思想: 过自信类提高增强概率，欠自信类降低增强概率
+  # mask 的 ratio 仍由三阶段参数统一控制，CADA 只调整触发概率
+  # CADA 在 warmup 结束后自动启用（使用 warmup_epochs 作为启动时机）
+  cada_enabled: true                  # 是否启用类别自适应增强
+  cada_sensitivity: 2.0               # 偏差敏感度 (越大响应越强)
+  cada_prob_range: [0.0, 0.8]         # 触发概率范围 [min, max]
 
 # ==============================================================================
 # 实验列表
@@ -187,7 +213,7 @@ experiments:
 # ==============================================================================
 # 只需修改此时间戳，所有检查点路径自动更新
 # 路径格式: ./output/training/{training_timestamp}/{exp_name}/checkpoints/best
-training_timestamp: "20260128_004045"  # 修改这里即可
+training_timestamp: "20260130_125947"  # 修改这里即可
 
 # 实验列表
 eval_checkpoints:
@@ -218,46 +244,156 @@ generation:
   # 可视化选项
   vis_corruptions: ["fog"]  # 可视化的 corruption 类型
 
-  # OOD Prompts (CIFAR-10 Near-OOD: 与 10 类相似但不属于它们)
-  # CIFAR-10: 飞机/汽车/鸟/猫/鹿/狗/青蛙/马/船/卡车
-  ood_prompts:
-    # 飞机近似: 直升机、无人机、热气球
-    - "helicopter flying in clear blue sky"
-    - "drone quadcopter hovering in air"
-    - "hot air balloon floating above fields"
-    # 汽车近似: 摩托车、公交车、火车
-    - "motorcycle parked on street"
-    - "city bus at bus stop"
-    - "steam locomotive train"
-    # 鸟近似: 蝴蝶、蜻蜓、蝙蝠
-    - "colorful butterfly on flower"
-    - "dragonfly with transparent wings"
-    - "bat flying at dusk"
-    # 猫近似: 狐狸、豹、山猫
-    - "red fox in forest"
-    - "leopard resting on tree branch"
-    - "lynx in snowy woods"
-    # 狗近似: 狼、郊狼、鬣狗
-    - "grey wolf in snow"
-    - "coyote in grassland"
-    - "hyena on savanna"
-    # 鹿近似: 羚羊、驼鹿、麋鹿
-    - "antelope running in plains"
-    - "moose in forest clearing"
-    - "elk by mountain stream"
-    # 马近似: 斑马、驴、骡
-    - "zebra in african savanna"
-    - "donkey on farm path"
-    - "mule carrying load"
-    # 青蛙近似: 蟾蜍、蜥蜴、蝾螈
-    - "toad sitting on wet rock"
-    - "green lizard on tree bark"
-    - "salamander near pond"
-    # 船近似: 潜艇、游艇、独木舟
-    - "submarine surfacing in ocean"
-    - "luxury yacht at marina"
-    - "kayak on calm lake"
-    # 卡车近似: 挖掘机、拖拉机、坦克
-    - "excavator on construction site"
-    - "red tractor in farm field"
-    - "military tank"
+  # ==========================================================================
+  # Near-OOD Prompts: 与训练类别相似但不同的样本 (难检测)
+  # ==========================================================================
+  near_ood_prompts:
+    # CIFAR-10 类别: 飞机/汽车/鸟/猫/鹿/狗/青蛙/马/船/卡车
+    cifar10:
+      # 飞机近似: 直升机、无人机、热气球
+      - "helicopter flying in clear blue sky"
+      - "drone quadcopter hovering in air"
+      - "hot air balloon floating above fields"
+      # 汽车近似: 摩托车、公交车、火车
+      - "motorcycle parked on street"
+      - "city bus at bus stop"
+      - "steam locomotive train"
+      # 鸟近似: 蝴蝶、蜻蜓、蝙蝠
+      - "colorful butterfly on flower"
+      - "dragonfly with transparent wings"
+      - "bat flying at dusk"
+      # 猫近似: 狐狸、豹、山猫
+      - "red fox in forest"
+      - "leopard resting on tree branch"
+      - "lynx in snowy woods"
+      # 狗近似: 狼、郊狼、鬣狗
+      - "grey wolf in snow"
+      - "coyote in grassland"
+      - "hyena on savanna"
+      # 鹿近似: 羚羊、驼鹿、麋鹿
+      - "antelope running in plains"
+      - "moose in forest clearing"
+      - "elk by mountain stream"
+      # 马近似: 斑马、驴、骡
+      - "zebra in african savanna"
+      - "donkey on farm path"
+      - "mule carrying load"
+      # 青蛙近似: 蟾蜍、蜥蜴、蝾螈
+      - "toad sitting on wet rock"
+      - "green lizard on tree bark"
+      - "salamander near pond"
+      # 船近似: 潜艇、游艇、独木舟
+      - "submarine surfacing in ocean"
+      - "luxury yacht at marina"
+      - "kayak on calm lake"
+      # 卡车近似: 挖掘机、拖拉机、坦克
+      - "excavator on construction site"
+      - "red tractor in farm field"
+      - "military tank"
+
+    cifar100:
+      # 动物类近似
+      - "platypus swimming in river"
+      - "pangolin curled up"
+      - "tapir in rainforest"
+      - "okapi in dense forest"
+      - "capybara by water"
+      # 交通工具近似
+      - "segway on sidewalk"
+      - "hovercraft on water"
+      - "cable car over mountain"
+      - "rickshaw on street"
+      # 自然场景近似
+      - "aurora borealis over snow"
+      - "volcanic eruption at night"
+      - "meteor shower in sky"
+
+    eurosat:
+      # 工业设施近似: 采矿场、废弃工厂
+      - "aerial view of mining quarry"
+      - "abandoned factory from above"
+      - "oil refinery aerial photograph"
+      # 水体近似: 湿地、冰川
+      - "satellite image of wetland marsh"
+      - "glacier aerial view"
+      - "reservoir dam from satellite"
+      # 植被近似: 沙漠绿洲、苔原
+      - "desert oasis aerial view"
+      - "tundra landscape satellite image"
+      - "bamboo forest from above"
+      # 人造结构近似: 机场跑道、体育场
+      - "airport runway aerial view"
+      - "sports stadium from satellite"
+      - "solar farm aerial photograph"
+
+  # ==========================================================================
+  # Far-OOD Prompts: 与训练数据完全不同的样本 (易检测)
+  # ==========================================================================
+  far_ood_prompts:
+    # 通用 Far-OOD (适用于所有自然图像数据集)
+    cifar10:
+      # 纹理/抽象图案
+      - "abstract geometric patterns colorful"
+      - "fabric textile closeup texture"
+      - "marble stone surface texture"
+      - "wood grain pattern closeup"
+      # 微观世界
+      - "microscopic cell structure biology"
+      - "crystal formations closeup"
+      - "snowflake macro photography"
+      - "bacteria under microscope"
+      # 天文/太空
+      - "deep space nebula colorful"
+      - "galaxy spiral arms photograph"
+      - "asteroid surface closeup"
+      - "solar flare sun surface"
+      # 艺术/风格化
+      - "oil painting brushstrokes abstract"
+      - "pencil sketch drawing portrait"
+      - "watercolor painting landscape"
+      - "digital glitch art colorful"
+      # 人造图案
+      - "circuit board electronics closeup"
+      - "QR code barcode pattern"
+      - "fingerprint scan biometric"
+      - "radar noise static pattern"
+
+    cifar100:
+      # 纹理/抽象图案
+      - "abstract geometric patterns colorful"
+      - "fabric textile closeup texture"
+      - "marble stone surface texture"
+      # 微观世界
+      - "microscopic cell structure biology"
+      - "crystal formations closeup"
+      - "pollen grain microscope"
+      # 天文/太空
+      - "deep space nebula colorful"
+      - "galaxy spiral arms photograph"
+      - "moon crater surface"
+      # 艺术/风格化
+      - "oil painting brushstrokes abstract"
+      - "cubism art style painting"
+      - "digital glitch art colorful"
+      # 人造图案
+      - "circuit board electronics closeup"
+      - "fractal mathematical visualization"
+      - "topographic map contour lines"
+
+    eurosat:
+      # 非地球表面
+      - "mars surface satellite view"
+      - "moon crater aerial view"
+      - "venus cloud satellite image"
+      # 微观非遥感
+      - "petri dish bacteria culture"
+      - "semiconductor wafer pattern"
+      - "textile fabric weave pattern"
+      # 艺术/抽象
+      - "abstract painting aerial perspective"
+      - "mandala geometric pattern"
+      - "camouflage military pattern"
+      # 非真实渲染
+      - "video game world map screenshot"
+      - "3d rendered terrain model"
+      - "cartoon map illustration"

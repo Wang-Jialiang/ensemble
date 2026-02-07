@@ -45,7 +45,12 @@ def get_logger(
         from rich.console import Console
         from rich.logging import RichHandler
 
-        rh = RichHandler(console=Console(), rich_tracebacks=True, show_path=True)
+        # Windows 兼容: 强制 UTF-8 输出避免 emoji 编码错误
+        rh = RichHandler(
+            console=Console(force_terminal=True, legacy_windows=False),
+            rich_tracebacks=True,
+            show_path=True,
+        )
         log.addHandler(rh)
 
     # 文件输出 (保持标准格式)

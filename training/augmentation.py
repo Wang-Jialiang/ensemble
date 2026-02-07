@@ -12,6 +12,7 @@ from typing import List, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║ 云状Mask生成器                                                               ║
@@ -194,6 +195,28 @@ class AugmentationMethod:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+    @staticmethod
+    def _random_rotate_mask(mask: torch.Tensor, max_angle: int = 360) -> torch.Tensor:
+        """对 mask 进行随机旋转以增加多样性。
+
+        参考官方 GridMask 实现，对预计算的 mask 进行随机角度旋转。
+
+        Args:
+            mask: 形状为 [1, 1, H, W] 的 mask 张量
+            max_angle: 最大旋转角度 (0-max_angle 随机)
+
+        Returns:
+            torch.Tensor: 旋转后的 mask，形状不变
+        """
+        if max_angle <= 0:
+            return mask
+        angle = random.randint(0, max_angle - 1)
+        if angle == 0:
+            return mask
+        # 使用 torchvision 进行旋转，保持在 GPU 上
+        rotated = TF.rotate(mask, angle, fill=1.0)  # 填充 1 表示未遮挡
+        return rotated
+
     def precompute_masks(self, target_ratio: float):
         """预计算 mask 池。
 
@@ -284,6 +307,8 @@ class CutoutAugmentation(AugmentationMethod):
                 y = random.randint(0, max(0, H - size))
                 x = random.randint(0, max(0, W - size))
                 mask[:, :, y : y + size, x : x + size] = 0
+            # 随机旋转增加多样性
+            mask = self._random_rotate_mask(mask)
             self._masks.append(mask)
 
 
@@ -321,6 +346,8 @@ class PixelHaSAugmentation(AugmentationMethod):
         H, W = self.height, self.width
         for _ in range(self._pool_size):
             mask = (torch.rand((1, 1, H, W), device=self.device) > target_ratio).float()
+            # 随机旋转增加多样性
+            mask = self._random_rotate_mask(mask)
             self._masks.append(mask)
 
 
@@ -364,7 +391,10 @@ class GridMaskAugmentation(AugmentationMethod):
         self._clear_masks()  # 清理旧 mask，释放显存
         H, W = self.height, self.width
         for _ in range(self._pool_size):
-            self._masks.append(self._generate_single_mask(H, W, target_ratio))
+            mask = self._generate_single_mask(H, W, target_ratio)
+            # 随机旋转增加多样性 (参考官方 GridMask 实现)
+            mask = self._random_rotate_mask(mask)
+            self._masks.append(mask)
 
     def _generate_single_mask(self, H, W, ratio):
         """生成单张网格 Mask"""
@@ -434,7 +464,9 @@ class PerlinMaskAugmentation(AugmentationMethod):
     def precompute_masks(self, target_ratio: float):
         """预计算 Perlin mask 池"""
         self._clear_masks()  # 清理旧 mask，释放显存
-        self._masks = self.mask_generator.generate_batch(self._pool_size, target_ratio)
+        raw_masks = self.mask_generator.generate_batch(self._pool_size, target_ratio)
+        # 随机旋转增加多样性
+        self._masks = [self._random_rotate_mask(m) for m in raw_masks]
 
 
 @register_augmentation("gridded_perlin")
@@ -482,7 +514,10 @@ class GriddedPerlinAugmentation(AugmentationMethod):
         """预计算网格化 Perlin mask 池"""
         self._clear_masks()
         for _ in range(self._pool_size):
-            self._masks.append(self._generate_gridded_perlin_mask(target_ratio))
+            mask = self._generate_gridded_perlin_mask(target_ratio)
+            # 随机旋转增加多样性
+            mask = self._random_rotate_mask(mask)
+            self._masks.append(mask)
 
     def _generate_gridded_perlin_mask(self, target_ratio: float) -> torch.Tensor:
         """生成单张网格化 Perlin mask"""
@@ -579,3 +614,128 @@ class NoAugmentation(AugmentationMethod):
         prob: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return images, targets
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ 类别自适应增强包装器                                                          ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+class ClassAdaptiveAugmentation:
+    """类别自适应数据增强包装器。
+
+    基于论文 "Improving Calibration of BatchEnsemble with Data Augmentation" 的思想，
+    根据每个类别的置信度偏差动态调整增强参数：
+        - 过自信类 (Confidence > Accuracy): 增强更激进
+        - 欠自信类 (Confidence < Accuracy): 增强更保守
+
+    包装任意 AugmentationMethod 实例，提供类别级自适应应用。
+
+    Attributes:
+        base_method: 被包装的基础增强方法
+        class_probs: 每个类别的触发概率
+        enabled: 是否启用自适应模式
+    """
+
+    def __init__(
+        self,
+        base_method: AugmentationMethod,
+        num_classes: int,
+        base_prob: float = 0.8,
+    ):
+        """初始化类别自适应增强器。
+
+        Args:
+            base_method: 基础增强方法实例
+            num_classes: 类别数量
+            base_prob: 默认触发概率
+        """
+        self.base_method = base_method
+        self.num_classes = num_classes
+        self.base_prob = base_prob
+
+        # 初始化为统一参数
+        self.class_probs = [base_prob] * num_classes
+        self.enabled = False  # 默认关闭，warmup 阶段使用
+
+        # 代理属性
+        self.device = base_method.device
+
+    def update_adaptive_probs(self, class_probs: list):
+        """更新类别级触发概率。
+
+        Args:
+            class_probs: 每个类别的触发概率
+        """
+        if len(class_probs) == self.num_classes:
+            self.class_probs = class_probs
+
+    def enable(self):
+        """启用自适应模式。"""
+        self.enabled = True
+
+    def disable(self):
+        """禁用自适应模式（使用基础参数）。"""
+        self.enabled = False
+
+    def precompute_masks(self, target_ratio: float):
+        """预计算 mask 池（代理到基础方法）。
+
+        ratio 由三阶段参数统一控制，CADA 只调整触发概率。
+        """
+        self.base_method.precompute_masks(target_ratio)
+
+    def apply(
+        self,
+        images: torch.Tensor,
+        targets: torch.Tensor,
+        ratio: float,
+        prob: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """应用类别自适应增强。
+
+        Args:
+            images: 输入图像 [B, C, H, W]
+            targets: 标签 [B]
+            ratio: 基础遮挡比例（自适应模式下被覆盖）
+            prob: 基础触发概率（自适应模式下被覆盖）
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: 增强后的图像和标签
+        """
+        if not self.enabled:
+            # 非自适应模式，直接使用基础方法
+            return self.base_method.apply(images, targets, ratio, prob)
+
+        # 自适应模式：逐样本应用不同参数
+        B, C, H, W = images.shape
+        augmented = images.clone()
+        base_method = self.base_method
+
+        if not base_method._masks:
+            raise RuntimeError(
+                "ClassAdaptiveAugmentation: call precompute_masks() first"
+            )
+
+        for b in range(B):
+            class_idx = targets[b].item()
+            sample_prob = self.class_probs[class_idx]
+
+            # 概率判断
+            if random.random() > sample_prob:
+                continue
+
+            # 应用遮挡
+            m = random.choice(base_method._masks).squeeze(0)  # [1, H, W]
+            augmented[b] = images[b] * m + (1 - m) * base_method._fill_value
+
+        return augmented, targets
+
+    def get_stats(self) -> dict:
+        """获取当前自适应参数统计。"""
+        return {
+            "enabled": self.enabled,
+            "avg_prob": sum(self.class_probs) / len(self.class_probs),
+            "max_prob": max(self.class_probs),
+            "min_prob": min(self.class_probs),
+        }

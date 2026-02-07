@@ -91,6 +91,22 @@ def _compute_mahalanobis_scores(
     return np.array(scores)
 
 
+def _compute_entropy_scores(logits: torch.Tensor) -> np.ndarray:
+    """计算 Predictive Entropy 分数
+
+    H(p) = -sum(p * log(p))
+
+    Args:
+        logits: [N, C] 模型输出
+
+    Returns:
+        scores: [N] 负熵分数 (ID 熵低/负熵高, OOD 熵高/负熵低)
+    """
+    probs = F.softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+    return -entropy.cpu().numpy()  # 取负使 ID 分数 > OOD 分数
+
+
 def _fit_gaussian(
     features: torch.Tensor, labels: torch.Tensor, num_classes: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -229,7 +245,11 @@ def evaluate_ood(
     id_energy = _compute_energy_scores(id_logits_avg)
     ood_energy = _compute_energy_scores(ood_logits_avg)
 
-    # ==================== 3. 计算 Mahalanobis 分数 ====================
+    # ==================== 3. 计算 Entropy 分数 ====================
+    id_ent = _compute_entropy_scores(id_logits_avg)
+    ood_ent = _compute_entropy_scores(ood_logits_avg)
+
+    # ==================== 4. 计算 Mahalanobis 分数 ====================
     log.info("  📊 Extracting features for Mahalanobis...")
     id_features, id_feat_labels = _extract_ensemble_features(models, id_loader, device)
     ood_features, _ = _extract_ensemble_features(models, ood_loader, device)
@@ -264,6 +284,11 @@ def evaluate_ood(
         "ood_auroc_mahalanobis": _auroc(id_mahal, ood_mahal),
         "ood_fpr95_mahalanobis": _compute_fpr_at_95tpr(
             np.concatenate([id_mahal, ood_mahal]), y
+        ),
+        # Entropy
+        "ood_auroc_entropy": _auroc(id_ent, ood_ent),
+        "ood_fpr95_entropy": _compute_fpr_at_95tpr(
+            np.concatenate([id_ent, ood_ent]), y
         ),
     }
 

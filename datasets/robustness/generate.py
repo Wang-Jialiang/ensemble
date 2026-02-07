@@ -325,9 +325,9 @@ class OODGenerator:
         self.lightning_repo = lightning_repo
         self.lightning_ckpt = lightning_ckpt
         if prompts is None:
-            from ...config import Config
-
-            prompts = Config().generation.ood_prompts
+            raise ValueError(
+                "❌ 必须提供 prompts 参数 (从 yaml 按数据集获取对应的 ood_prompts)"
+            )
         self.prompts = prompts
         self.num_steps = num_steps
         self.sdxl_height = sdxl_height
@@ -565,21 +565,28 @@ def generate_ood_dataset(
     lightning_ckpt: str = "sdxl_lightning_4step_unet.safetensors",
     prompts: Optional[list] = None,
     num_steps: int = 4,
+    ood_type: str = "near",  # "near" 或 "far"
 ) -> Path:
-    """预生成 OOD 数据集 (仅保存 resize 后的小图)"""
+    """预生成 OOD 数据集 (仅保存 resize 后的小图)
+
+    Args:
+        ood_type: "near" = Near-OOD, "far" = Far-OOD
+    """
     import time
 
     if dataset_name not in DATASET_REGISTRY:
         raise ValueError(f"未知数据集: {dataset_name}")
 
     DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
+    # 根据 ood_type 区分输出目录
+    ood_suffix = "Near-OOD" if ood_type == "near" else "Far-OOD"
+    output_dir = Path(root) / f"{DatasetClass.NAME}-{ood_suffix}"
 
     if _check_existing_dataset(output_dir, force):
         return output_dir
 
     get_logger().info(
-        f"🔧 生成 OOD: {DatasetClass.NAME} ({num_samples} 张, SDXL Lightning 4-step)"
+        f"🔧 生成 {ood_suffix}: {DatasetClass.NAME} ({num_samples} 张, SDXL Lightning 4-step)"
     )
 
     start_time = time.time()
@@ -620,7 +627,7 @@ def generate_ood_dataset(
 
     elapsed = time.time() - start_time
     get_logger().info(
-        f"✅ {DatasetClass.NAME}-OOD 生成完成! {num_samples} 张 ⏱️ 耗时: {elapsed:.1f}s ({elapsed / 60:.1f}分钟)"
+        f"✅ {DatasetClass.NAME}-{ood_suffix} 生成完成! {num_samples} 张 ⏱️ 耗时: {elapsed:.1f}s ({elapsed / 60:.1f}分钟)"
     )
     return output_dir
 
@@ -689,6 +696,13 @@ def _parse_args():
     parser.add_argument(
         "--dataset", type=str, required=True, choices=list(DATASET_REGISTRY.keys())
     )
+    parser.add_argument(
+        "--ood-type",
+        type=str,
+        default="both",
+        choices=["near", "far", "both"],
+        help="OOD 类型: near=Near-OOD, far=Far-OOD, both=两者都生成 (默认)",
+    )
     parser.add_argument("--force", action="store_true", help="忽略缓存强制生成")
     return parser.parse_args()
 
@@ -706,19 +720,36 @@ def _execute_generation(args, config):
             args.dataset, config.data_root, config.seed, args.force
         )
     elif args.type == "ood":
-        generate_ood_dataset(
-            args.dataset,
-            config.data_root,
-            gen_cfg.samples_per_group,
-            config.seed,
-            args.force,
-            gen_cfg.batch_size,
-            gen_cfg.base_model,
-            gen_cfg.lightning_repo,
-            gen_cfg.lightning_ckpt,
-            gen_cfg.ood_prompts,
-            gen_cfg.num_steps,
-        )
+        ood_types = ["near", "far"] if args.ood_type == "both" else [args.ood_type]
+
+        for ood_type in ood_types:
+            # 根据 OOD 类型选择对应的 prompts
+            prompts_dict = (
+                gen_cfg.near_ood_prompts
+                if ood_type == "near"
+                else gen_cfg.far_ood_prompts
+            )
+            ood_prompts = prompts_dict.get(args.dataset) if prompts_dict else None
+
+            if ood_prompts is None:
+                raise ValueError(
+                    f"❌ 未找到数据集 '{args.dataset}' 的 {ood_type}_ood_prompts，请在 default.yaml 中配置"
+                )
+
+            generate_ood_dataset(
+                args.dataset,
+                config.data_root,
+                gen_cfg.samples_per_group,
+                config.seed,
+                args.force,
+                gen_cfg.batch_size,
+                gen_cfg.base_model,
+                gen_cfg.lightning_repo,
+                gen_cfg.lightning_ckpt,
+                ood_prompts,
+                gen_cfg.num_steps,
+                ood_type=ood_type,  # 传递 OOD 类型
+            )
 
 
 def _execute_visualization(args, config):
@@ -731,12 +762,15 @@ def _execute_visualization(args, config):
             config.seed,
         )
     elif args.type == "ood":
-        visualize_ood(
-            args.dataset,
-            config.data_root,
-            config.generation.num_vis,
-            config.generation,
-        )
+        ood_types = ["near", "far"] if args.ood_type == "both" else [args.ood_type]
+        for ood_type in ood_types:
+            visualize_ood(
+                args.dataset,
+                config.data_root,
+                config.generation.num_vis,
+                config.generation,
+                ood_type=ood_type,
+            )
 
 
 def save_visual_grid(
@@ -780,24 +814,29 @@ def visualize_ood(
     root: str = "./data",
     num_vis: int = 8,
     gen_cfg=None,
+    ood_type: str = "near",  # "near" 或 "far"
 ):
     """为 OOD 生成可视化网格
+
+    Args:
+        ood_type: "near" = Near-OOD, "far" = Far-OOD
 
     1. 展示 resize 后的小图 (从 images.npy)
     2. 实时生成 num_vis 个高分辨率原图并展示
     """
     DatasetClass = DATASET_REGISTRY[dataset_name]
-    output_dir = Path(root) / f"{DatasetClass.NAME}-OOD"
+    ood_suffix = "Near-OOD" if ood_type == "near" else "Far-OOD"
+    output_dir = Path(root) / f"{DatasetClass.NAME}-{ood_suffix}"
     vis_dir = output_dir / "visuals"
     ensure_dir(vis_dir)
 
     images_path = output_dir / "images.npy"
 
     if not images_path.exists():
-        get_logger().warning(f"⚠️ OOD 数据未找到: {images_path}")
+        get_logger().warning(f"⚠️ {ood_suffix} 数据未找到: {images_path}")
         return
 
-    get_logger().info("🎨 正在生成 OOD 可视化...")
+    get_logger().info(f"🎨 正在生成 {ood_suffix} 可视化...")
 
     # 1. 加载并展示 resize 后的小图
     images = np.load(str(images_path), mmap_mode="r")
@@ -807,33 +846,46 @@ def visualize_ood(
 
     save_visual_grid(
         vis_images,
-        vis_dir / "ood_samples_resized.png",
-        "OOD Samples (Resized)",
+        vis_dir / f"{ood_type}_ood_samples_resized.png",
+        f"{ood_suffix} Samples (Resized)",
         num_samples=num_vis,
         nrow=4,
     )
 
     # 2. 实时生成 num_vis 个高分辨率原图
     if gen_cfg is not None:
+        # 根据 ood_type 选择对应的 prompts
+        prompts_dict = (
+            gen_cfg.near_ood_prompts if ood_type == "near" else gen_cfg.far_ood_prompts
+        )
+        ood_prompts = prompts_dict.get(dataset_name) if prompts_dict else None
+
+        if ood_prompts is None:
+            get_logger().warning(
+                f"⚠️ 未找到数据集 '{dataset_name}' 的 {ood_type}_ood_prompts，跳过高分辨率可视化"
+            )
+            return
         get_logger().info(f"   📷 生成 {num_vis} 张高分辨率原图用于可视化...")
         generator = OODGenerator(
             device="cuda" if torch.cuda.is_available() else "cpu",
             base_model=gen_cfg.base_model,
             lightning_repo=gen_cfg.lightning_repo,
             lightning_ckpt=gen_cfg.lightning_ckpt,
-            prompts=gen_cfg.ood_prompts,
+            prompts=ood_prompts,
             num_steps=gen_cfg.num_steps,
         )
         hires_samples = generator.generate_hires_samples(num_vis, seed=42)
 
         save_visual_grid(
             hires_samples,
-            vis_dir / "ood_samples_hires.png",
-            "OOD Samples (High-Resolution 1024x1024)",
+            vis_dir / f"{ood_type}_ood_samples_hires.png",
+            f"{ood_suffix} Samples (High-Resolution 1024x1024)",
             num_samples=num_vis,
             nrow=4,
         )
-        get_logger().info(f"   ✅ 高分辨率原图: {vis_dir / 'ood_samples_hires.png'}")
+        get_logger().info(
+            f"   ✅ 高分辨率原图: {vis_dir / f'{ood_type}_ood_samples_hires.png'}"
+        )
 
 
 if __name__ == "__main__":

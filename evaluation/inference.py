@@ -43,15 +43,39 @@ def get_models_from_source(source: Any) -> Tuple[List[nn.Module], torch.device]:
 
 
 def get_all_models_logits(
-    models: List[nn.Module], loader: DataLoader, device: torch.device = None
+    models: List[nn.Module],
+    loader: DataLoader,
+    device: torch.device = None,
+    tta_config: Optional[dict] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """全量数据集推理门面 - 支持多 GPU 并行推理
+    """全量数据集推理门面 - 支持多 GPU 并行推理和可选 TTA
 
     Args:
         models: 模型列表（可能分布在不同 GPU 上）
         loader: 数据加载器
         device: 已弃用，保留兼容性（实际使用模型自身的设备）
+        tta_config: TTA 配置字典 (可选)，包含:
+            - tta_enabled: bool
+            - tta_strategy: str ("light", "standard", "heavy", "geospatial")
+            - tta_crop_scales: List[float]
+            - tta_num_crops: int
+
+    Returns:
+        logits: [num_models, num_samples, num_classes]
+        targets: [num_samples]
     """
+    # 如果启用 TTA，使用 TTA 推理路径
+    if tta_config and tta_config.get("tta_enabled", False):
+        from .tta import TTAAugmentor, get_all_models_logits_with_tta
+
+        # 获取图像尺寸 (从第一个 batch 推断)
+        sample_batch = next(iter(loader))
+        image_size = sample_batch[0].shape[-1]  # 假设方形图像
+
+        augmentor = TTAAugmentor.from_config(tta_config, image_size)
+        return get_all_models_logits_with_tta(models, loader, augmentor, device)
+
+    # 标准推理路径
     from tqdm import tqdm
 
     all_l, all_t = [], []

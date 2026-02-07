@@ -18,6 +18,7 @@
 from .augmentation import (
     AUGMENTATION_REGISTRY,
     AugmentationMethod,
+    ClassAdaptiveAugmentation,
     CutoutAugmentation,
     GridMaskAugmentation,
     NoAugmentation,
@@ -25,6 +26,9 @@ from .augmentation import (
     PixelHaSAugmentation,
     register_augmentation,
 )
+
+# 校准追踪器
+from .calibration_tracker import CalibrationTracker
 
 # 核心训练器
 from .core import (
@@ -52,9 +56,12 @@ __all__ = [
     # Worker
     "GPUWorker",
     "HistorySaver",
+    # Calibration
+    "CalibrationTracker",
     # Augmentation
     "AUGMENTATION_REGISTRY",
     "AugmentationMethod",
+    "ClassAdaptiveAugmentation",
     "CutoutAugmentation",
     "GridMaskAugmentation",
     "PixelHaSAugmentation",

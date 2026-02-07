@@ -93,6 +93,13 @@ class MetricsCalculator:
             "ece": self.ece_metric(ens_logits, targets).item(),
             "avg_individual_acc": indiv_accs.mean().item(),
             "oracle_acc": 100.0 * (all_preds == targets).any(0).float().mean().item(),
+            "entropy": -torch.sum(
+                F.softmax(ens_logits, dim=1)
+                * torch.log(F.softmax(ens_logits, dim=1) + 1e-8),
+                dim=1,
+            )
+            .mean()
+            .item(),
         }
 
     def _calc_diversity(self, all_logits, all_features=None):
@@ -154,19 +161,45 @@ class MetricsCalculator:
         return js.mean().item()
 
     def _calc_fairness(self, ens_preds, targets, all_logits):
-        """计算公平性指标集（精简版）"""
+        """计算公平性指标集
+
+        本方法包含两类公平性度量：
+
+        【类型1】极小极大公平性 (Minimax Fairness / Subgroup Performance)
+            - 关注最差群体的 **绝对性能**
+            - 指标: worst_class_acc, bottom_3_class_acc, bottom_5_class_acc
+            - 逻辑: 弱势群体准确率提升 → 模型更公平
+            - 参考: FAIR-Ensemble
+
+        【类型2】组间差异度量 (Gap-based Metrics)
+            - 关注组与组之间的 **相对差距**
+            - 指标: eod, fairness_score, acc_gini_coef
+            - 逻辑: 组间差距缩小 → 模型更公平
+            - 参考: DBDE (SPD/EOD/AOD)
+        """
         f = {}
         # 1. 逐类统计（内部使用，不输出）
         class_accs = self._get_per_class_stats(ens_preds, targets)
 
-        # 2. 宏观公平性指标 (Balanced Acc, Gini)
         valid_accs = torch.tensor([a for a in class_accs if a >= 0])
         if len(valid_accs) > 0:
-            f["balanced_acc"] = valid_accs.mean().item()
-            f["acc_gini_coef"] = self._calc_gini(valid_accs)
-            f["fairness_score"] = 100.0 - (valid_accs.max() - valid_accs.min()).item()
+            # ════════════════════════════════════════════════════════════════
+            # 【类型1】极小极大公平性 (Minimax Fairness)
+            #   关注最差群体的绝对性能，值越高越公平
+            # ════════════════════════════════════════════════════════════════
+            f["worst_class_acc"] = valid_accs.min().item()  # 最差类别准确率
 
-        # 3. 少数群体探测 (EOD, RER)
+            # ════════════════════════════════════════════════════════════════
+            # 【类型2】组间差异度量 (Gap-based Metrics)
+            #   关注组间差距，值越低越公平
+            # ════════════════════════════════════════════════════════════════
+            f["balanced_acc"] = valid_accs.mean().item()  # 各类平均准确率
+            f["acc_gini_coef"] = self._calc_gini(valid_accs)  # 准确率不平等程度
+            f["fairness_score"] = (
+                100.0 - (valid_accs.max() - valid_accs.min()).item()
+            )  # 100减去最大差距
+
+        # 3. 少数群体探测 (包含两类指标)
         f.update(self._calc_minority_bias(ens_preds, targets, all_logits, class_accs))
         return f
 
@@ -202,7 +235,7 @@ class MetricsCalculator:
         )
 
     def _calc_minority_bias(self, ens_preds, targets, all_logits, class_accs):
-        """探测并量化针对少数类别的偏见（精简版）"""
+        """探测并量化针对少数类别的偏见"""
         res = {}
         counts = torch.tensor(
             [(targets == c).sum().item() for c in range(self.num_classes)]
@@ -215,18 +248,24 @@ class MetricsCalculator:
         mini_idx = valid_idx[counts[valid_idx].argmin()].item()
         majo_idx = valid_idx[counts[valid_idx].argmax()].item()
 
-        # 2. 计算 EOD (Equalized Odds Difference)
+        # ════════════════════════════════════════════════════════════════
+        # 【类型2】组间差异度量 (Gap-based)
+        #   EOD: 少数类与多数类召回率差距，值越低越公平
+        # ════════════════════════════════════════════════════════════════
         mini_rec = class_accs[mini_idx] / 100.0
         majo_rec = class_accs[majo_idx] / 100.0
         res["eod"] = abs(majo_rec - mini_rec) * 100.0
 
-        # 3. Bottom-K 类别分析
+        # ════════════════════════════════════════════════════════════════
+        # 【类型1】极小极大公平性 (Minimax Fairness)
+        #   Bottom-K: 最弱K个类别的绝对准确率，值越高越公平
+        # ════════════════════════════════════════════════════════════════
         all_preds = all_logits.argmax(2)
         res.update(self._calc_bottom_k(all_preds, targets, class_accs))
         return res
 
     def _calc_bottom_k(self, all_preds, targets, class_accs):
-        """计算单模型表现最差的 K 个类别的集成表现"""
+        """【类型1】计算单模型表现最差的 K 个类别的集成表现（Minimax Fairness）"""
         res = {}
         # 计算单模型在各类的平均准确率（用于识别 bottom-k 类别）
         sng_class_accs = torch.tensor(
